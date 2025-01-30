@@ -110,10 +110,10 @@ function _artisan() {
           fi
         fi
 
-        eval "$artisan_cmd list --raw" | awk '{gsub(/:/, "\\:", $0); print $0}' >"$cache_file"
+        eval "$artisan_cmd list --raw" | awk '{print $1}' >"$cache_file"
       fi
 
-      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " | read -r line
+      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " | sed 's/\\:/:/g' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
