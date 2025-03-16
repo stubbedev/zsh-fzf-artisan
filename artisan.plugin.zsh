@@ -74,7 +74,7 @@ function _artisan() {
       local artisan_cmd="php $artisan_path"
 
       # Generate current command list
-      eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description)"' >"$current_command_list"
+      eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description | gsub("\n"; " "))"' >"$current_command_list"
 
       # Cache invalidation check
       if [[ ! -f "$cache_file" || "$artisan_path" -nt "$cache_file" ||
@@ -87,7 +87,7 @@ function _artisan() {
       fi
 
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
-      cat "$cache_file" | grep -v '_complete' | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --bind 'tab:accept' --preview-window=right:50% | awk -F"\t" '{printf "%-40s %s\n", $1, $2}' | sed 's/\n.*//g' | read -r line
+      cat "$cache_file" | grep -v '_complete' | fzf --height=40% --reverse --prompt="Artisan Command > " --bind 'tab:accept' | awk '{print $1}' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
