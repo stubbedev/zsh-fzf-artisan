@@ -91,31 +91,37 @@ function _artisan() {
       local cache_key=$(echo "$project_dir" | md5sum | cut -d' ' -f1).cache
       local cache_file="${ARTISAN_CACHE_DIR}/${cache_key}"
       local composer_lock="${project_dir}/composer.lock"
+      local current_command_list="${ARTISAN_CACHE_DIR}/${cache_key}.current"
+
+      local docker_compose_config_path=$(find "$project_dir" -maxdepth 1 \( -name "docker-compose.yml" -o -name "docker-compose.yaml" \) | head -n1)
+      local artisan_cmd
+
+      if [ -z "$docker_compose_config_path" ]; then
+        artisan_cmd="php $artisan_path"
+      else
+        if grep -q "laravel/sail" "$docker_compose_config_path"; then
+          artisan_cmd="$project_dir/vendor/bin/sail artisan"
+        else
+          local docker_compose_cmd=$(_docker_compose_cmd)
+          local service_name=$($docker_compose_cmd ps --services 2>/dev/null | grep 'app\|php\|api\|workspace\|laravel\.test\|webhost' | head -n1)
+          artisan_cmd="$docker_compose_cmd exec -T $service_name php artisan"
+        fi
+      fi
+
+      # Generate current command list
+      eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description)"' >"$current_command_list"
 
       # Cache invalidation check
       if [[ ! -f "$cache_file" || "$artisan_path" -nt "$cache_file" ||
-        (-f "$composer_lock" && "$composer_lock" -nt "$cache_file") ]]; then
-        local docker_compose_config_path=$(find "$project_dir" -maxdepth 1 \( -name "docker-compose.yml" -o -name "docker-compose.yaml" \) | head -n1)
-        local artisan_cmd
-
-        if [ -z "$docker_compose_config_path" ]; then
-          artisan_cmd="php $artisan_path"
-        else
-          if grep -q "laravel/sail" "$docker_compose_config_path"; then
-            artisan_cmd="$project_dir/vendor/bin/sail artisan"
-          else
-            local docker_compose_cmd=$(_docker_compose_cmd)
-            local service_name=$($docker_compose_cmd ps --services 2>/dev/null | grep 'app\|php\|api\|workspace\|laravel\.test\|webhost' | head -n1)
-            artisan_cmd="$docker_compose_cmd exec -T $service_name php artisan"
-          fi
-        fi
-
-        # Adjust to include command descriptions
-        eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description)"' >"$cache_file"
+        (-f "$composer_lock" && "$composer_lock" -nt "$cache_file") ||
+        ! cmp -s "$current_command_list" "$cache_file" ]]; then
+        mv "$current_command_list" "$cache_file"
+      else
+        rm "$current_command_list"
       fi
 
       # Adjusted fzf command to display descriptions
-      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --preview-window=right:50% | awk -F"\t" '{print $1}' | read -r line
+      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --bind 'tab:accept' --preview-window=right:50% | awk -F"\t" '{print $1}' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
