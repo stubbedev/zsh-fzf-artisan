@@ -79,11 +79,11 @@ function _artisan() {
       # Cache invalidation check
       if [[ ! -f "$cache_file" || "$artisan_path" -nt "$cache_file" ||
         (-f "$composer_lock" && "$composer_lock" -nt "$cache_file") ]]; then
-        mv "$current_command_list" "$cache_file"
+        mv -f "$current_command_list" "$cache_file"
       elif ! cmp -s "$current_command_list" "$cache_file"; then
-        mv "$current_command_list" "$cache_file"
+        mv -f "$current_command_list" "$cache_file"
       else
-        rm "$current_command_list"
+        rm -f "$current_command_list"
       fi
 
       # Adjusted fzf command to display descriptions
