@@ -110,10 +110,12 @@ function _artisan() {
           fi
         fi
 
-        eval "$artisan_cmd list --raw" | awk '{print $1}' >"$cache_file"
+        # Adjust to include command descriptions
+        eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description)"' >"$cache_file"
       fi
 
-      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " | sed 's/\\:/:/g' | read -r line
+      # Adjusted fzf command to display descriptions
+      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --preview-window=right:50% | awk -F"\t" '{print $1}' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
