@@ -87,7 +87,7 @@ function _artisan() {
       fi
 
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
-      cat "$cache_file" | grep -v '_complete' | fzf --height=40% --reverse --prompt="Artisan Command > " --bind 'tab:accept' | awk '{print $1}' | read -r line
+      cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
