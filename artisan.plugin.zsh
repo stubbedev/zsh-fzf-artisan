@@ -86,8 +86,8 @@ function _artisan() {
         rm -f "$current_command_list"
       fi
 
-      # Adjusted fzf command to display descriptions
-      cat "$cache_file" | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --bind 'tab:accept' --preview-window=right:50% | awk -F"\t" '{print $1}' | read -r line
+      # Adjusted fzf command to display descriptions and exclude '_complete'
+      cat "$cache_file" | grep -v '_complete' | fzf --height=40% --reverse --prompt="Artisan Command > " --preview 'echo {}' --bind 'tab:accept' --preview-window=right:50% | awk -F"\t" '{printf "%-40s %s\n", $1, $2}' | read -r line
       ret=$?
       if [ -n "$line" ]; then
         compadd -U -- "$line"
