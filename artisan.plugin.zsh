@@ -18,26 +18,7 @@ function artisan() {
     return 1
   fi
 
-  local laravel_path=$(dirname $artisan_path)
-  local docker_compose_config_path=$(find $laravel_path -maxdepth 1 \( -name "docker-compose.yml" -o -name "docker-compose.yaml" \) | head -n1)
-  local artisan_cmd
-
-  if [ "$docker_compose_config_path" = '' ]; then
-    artisan_cmd="php $artisan_path"
-  else
-    if [ "$(grep "laravel/sail" $docker_compose_config_path | head -n1)" != '' ]; then
-      artisan_cmd="$laravel_path/vendor/bin/sail artisan"
-    else
-      local docker_compose_cmd=$(_docker_compose_cmd)
-      local docker_compose_service_name=$($docker_compose_cmd ps --services 2>/dev/null | grep 'app\|php\|api\|workspace\|laravel\.test\|webhost' | head -n1)
-      if [ -t 1 ]; then
-        artisan_cmd="$docker_compose_cmd exec $docker_compose_service_name php artisan"
-      else
-        # The command is not being run in a TTY (e.g. it's being called by the completion handler below)
-        artisan_cmd="$docker_compose_cmd exec -T $docker_compose_service_name php artisan"
-      fi
-    fi
-  fi
+  local artisan_cmd="php $artisan_path"
 
   local artisan_start_time=$(date +%s)
 
@@ -48,9 +29,9 @@ function artisan() {
   if [[ $1 = "make:"* && $ARTISAN_OPEN_ON_MAKE_EDITOR != "" ]]; then
     # Find and open files created by artisan
     find \
-      "$laravel_path/app" \
-      "$laravel_path/tests" \
-      "$laravel_path/database" \
+      "$(dirname $artisan_path)/app" \
+      "$(dirname $artisan_path)/tests" \
+      "$(dirname $artisan_path)/database" \
       -type f \
       -newermt "-$(($(date +%s) - $artisan_start_time + 1)) seconds" \
       -exec $ARTISAN_OPEN_ON_MAKE_EDITOR {} \; 2>/dev/null
@@ -69,10 +50,8 @@ function _artisan_find() {
       echo "$dir/artisan"
       return 0
     fi
-
     dir+=/..
   done
-
   return 1
 }
 
@@ -92,30 +71,16 @@ function _artisan() {
       local cache_file="${ARTISAN_CACHE_DIR}/${cache_key}"
       local composer_lock="${project_dir}/composer.lock"
       local current_command_list="${ARTISAN_CACHE_DIR}/${cache_key}.current"
-
-      local docker_compose_config_path=$(find "$project_dir" -maxdepth 1 \( -name "docker-compose.yml" -o -name "docker-compose.yaml" \) | head -n1)
-      local artisan_cmd
-
-      if [ -z "$docker_compose_config_path" ]; then
-        artisan_cmd="php $artisan_path"
-      else
-        if grep -q "laravel/sail" "$docker_compose_config_path"; then
-          artisan_cmd="$project_dir/vendor/bin/sail artisan"
-        else
-          local docker_compose_cmd=$(_docker_compose_cmd)
-          local service_name=$($docker_compose_cmd ps --services 2>/dev/null | grep 'app\|php\|api\|workspace\|laravel\.test\|webhost' | head -n1)
-          artisan_cmd="$docker_compose_cmd exec -T $service_name php artisan"
-        fi
-      fi
+      local artisan_cmd="php $artisan_path"
 
       # Generate current command list
       eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description)"' >"$current_command_list"
 
       # Cache invalidation check
       if [[ ! -f "$cache_file" || "$artisan_path" -nt "$cache_file" ||
-        (-f "$composer_lock" && "$composer_lock" -nt "$cache_file") ||
-        (-f "$current_command_list" && ! cmp -s "$current_command_list" "$cache_file") ]]; then
-
+        (-f "$composer_lock" && "$composer_lock" -nt "$cache_file") ]]; then
+        mv "$current_command_list" "$cache_file"
+      elif ! cmp -s "$current_command_list" "$cache_file"; then
         mv "$current_command_list" "$cache_file"
       else
         rm "$current_command_list"
@@ -134,13 +99,4 @@ function _artisan() {
     _files
     ;;
   esac
-}
-
-function _docker_compose_cmd() {
-  docker compose &>/dev/null
-  if [ $? = 0 ]; then
-    echo "docker compose"
-  else
-    echo "docker-compose"
-  fi
 }
