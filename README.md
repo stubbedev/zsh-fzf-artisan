@@ -6,7 +6,6 @@ This is a Zsh plugin that integrates Laravel's Artisan command-line tool with fz
 
 - Execute Laravel Artisan commands from any directory within a Laravel project.
 - Autocompletion for Artisan commands using fzf.
-- Automatically detects and uses Docker Compose or Laravel Sail if available.
 - Opens files created by `artisan make:` commands in your preferred editor.
 
 ## Installation
@@ -50,12 +49,16 @@ This is a Zsh plugin that integrates Laravel's Artisan command-line tool with fz
 ## Requirements
 
 - [fzf](https://github.com/junegunn/fzf) must be installed for command autocompletion.
-- Docker and Docker Compose are required if you want to use the plugin with Dockerized Laravel projects.
+
+### Install on MacOS
+
+```bash
+brew install fzf
+```
 
 ## Notes
 
 - The plugin caches Artisan command lists to improve performance. Cache is stored in `~/.cache/artisan`.
-- Ensure that your Laravel project is set up correctly with Artisan and, if applicable, Docker Compose or Laravel Sail.
 
 ## License
 
