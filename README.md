@@ -32,7 +32,7 @@ This is a Zsh plugin that integrates Laravel's Artisan command-line tool with fz
 
 - Simply type `artisan` followed by any Artisan command you wish to execute.
 - Use the fzf interface to search and autocomplete Artisan commands. The fzf interface provides a fuzzy search capability, allowing you to quickly find and select Artisan commands from a list.
-- To trigger the fzf autocompletion, start typing an Artisan command and press `Tab`. This will open the fzf interface, where you can type to filter commands and press `Enter` to select one.
+- To trigger the fzf autocompletion, start typing an Artisan command and press `Tab`. This will open the fzf interface, where you can type to filter commands and press `tab` to select one.
 
 ## Configuration
 
