@@ -67,11 +67,23 @@ function _artisan() {
   command)
     if [[ -n "$artisan_path" ]]; then
       local project_dir=$(dirname "$artisan_path")
-      local cache_key=$(echo "$project_dir" | md5sum | cut -d' ' -f1).cache
+      if [[ "$OSTYPE" == "darwin"* ]]; then
+        local cache_key=$(echo "$project_dir" | md5 | awk '{print $1}').cache
+      else
+        local cache_key=$(echo "$project_dir" | md5sum | cut -d' ' -f1).cache
+      fi
       local cache_file="${ARTISAN_CACHE_DIR}/${cache_key}"
       local composer_lock="${project_dir}/composer.lock"
       local current_command_list="${ARTISAN_CACHE_DIR}/${cache_key}.current"
       local artisan_cmd="php $artisan_path"
+
+      # Check if jq is installed
+      if ! command -v jq &>/dev/null; then
+        echo "jq is not installed. Please install it to use this script."
+        echo "On macOS, you can install it using Homebrew: brew install jq"
+        echo "On Linux, you can install it using your package manager, e.g., sudo apt-get install jq"
+        return 1
+      fi
 
       # Generate current command list
       eval "$artisan_cmd list --format=json" | jq -r '.commands[] | "\(.name)\t\(.description | gsub("\n"; " "))"' >"$current_command_list"
@@ -87,12 +99,18 @@ function _artisan() {
       fi
 
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
-      cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}' | read -r line
+      local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
       ret=$?
-      if [ -n "$line" ]; then
-        compadd -U -- "$line"
+      if [ -n "$selected_command" ]; then
+        compadd -U -- "$selected_command"
       fi
       return $ret
+    fi
+    ;;
+  args)
+    if [[ -n "$artisan_path" ]]; then
+      local subcommands=$(eval "$artisan_cmd $words[1] --help" | grep -Eo '^\s+[a-zA-Z0-9:-]+' | awk '{$1=$1};1')
+      compadd -U -- $subcommands
     fi
     ;;
   *)
