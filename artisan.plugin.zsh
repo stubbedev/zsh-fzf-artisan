@@ -109,8 +109,27 @@ function _artisan() {
     ;;
   args)
     if [[ -n "$artisan_path" ]]; then
-      local subcommands=$(eval "$artisan_cmd $words[1] --help" | grep -Eo '^\s+[a-zA-Z0-9:-]+' | awk '{$1=$1};1')
-      compadd -U -- $subcommands
+      local output=$(eval "$artisan_cmd $words[1] --help")
+
+      # Extract subcommands (if present)
+      local subcommands=$(echo "$output" | awk '/Available commands:/ {found=1; next} found && /^[[:space:]]+[a-zA-Z0-9:-]+/ {print $1}')
+
+      # Extract arguments (words that appear between 'Usage:' and 'Options:')
+      local arguments=$(echo "$output" | awk '/Usage:/ {found=1; next} /Options:/ {found=0} found && /^[[:space:]]+[^-][a-zA-Z0-9:_]+/ {print $1}')
+
+      # Extract options (like --flags)
+      local options=$(echo "$output" | awk '/Options:/ {found=1; next} found && /^[[:space:]]+--?[a-zA-Z0-9|=:-]+/ {print $1}')
+
+      # Complete subcommands, arguments, and options if they exist
+      if [[ -n "$subcommands" ]]; then
+        compadd -U -- $subcommands
+      fi
+      if [[ -n "$arguments" ]]; then
+        compadd -U -- $arguments
+      fi
+      if [[ -n "$options" ]]; then
+        compadd -U -- $options
+      fi
     fi
     ;;
   *)
