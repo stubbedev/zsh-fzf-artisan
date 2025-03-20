@@ -99,7 +99,7 @@ function _artisan() {
       fi
 
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
-      local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+      local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
       ret=$?
       if [ -n "$selected_command" ]; then
         compadd -U -- "$selected_command"
@@ -129,7 +129,7 @@ function _artisan() {
 
       # Complete subcommands, arguments, and options if they exist
       if [[ -n "$artisan_subcommands" ]]; then
-        local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+        local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
         if [[ -n "$selected_subcommand" ]]; then
           compadd -U -- $selected_subcommand
         fi
@@ -139,7 +139,7 @@ function _artisan() {
       #     compadd -U -- $selected_argument
       #   fi
       elif [[ -n "$artisan_options" ]]; then
-        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
         if [[ -n "$selected_option" ]]; then
           compadd -U -- $selected_option
         fi
