@@ -57,6 +57,11 @@ function _artisan_find() {
 }
 
 function _artisan() {
+  local last_word=$words[-1]
+  if [[ -z $last_word ]]; then
+    last_word=$words[-2]
+  fi
+
   local state
   local artisan_path=$(_artisan_find)
 
@@ -110,10 +115,7 @@ function _artisan() {
     ;;
   args)
     if [[ -n "$artisan_path" ]]; then
-      local last_word=$words[-1]
-      if [[ -z $last_word ]]; then
-        last_word=$words[-2]
-      fi
+
       local output=$(eval "$words --help 2>&1")
 
       # Subcommands
