@@ -115,8 +115,8 @@ function _artisan() {
       # Subcommands
       local artisan_subcommands=$(echo "$output" | awk '/^Available commands for the/{flag=1; next} flag && NF{print} !NF{flag=0}')
 
-      # # Extract arguments (words that appear between 'Usage:' and 'Options:')
-      # local artisan_arguments=$(echo "$output" | awk '/^Arguments:/{flag=1; next} flag && NF{print} !NF{flag=0}')
+      # Arguments
+      local artisan_arguments=$(echo "$output" | awk '/^Arguments:/{flag=1; next} flag && !/namespace/ && NF{print} !NF{flag=0}')
 
       # Flags
       local artisan_options=$(echo "$output" | awk '/^Options:/{flag=1; next} flag && NF{
@@ -131,6 +131,15 @@ function _artisan() {
       if [[ -n "$artisan_subcommands" ]]; then
         local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
         if [[ -n "$selected_subcommand" ]]; then
+          # Extract the last word typed in the shell
+          local last_word="${words[-1]}"
+
+          # Check if the last word matches the beginning of the selected subcommand
+          if [[ "$selected_subcommand" == "$last_word"* ]]; then
+            # Remove the last word
+            words=("${words[@]:0:$((${#words[@]} - 1))}")
+          fi
+
           compadd -U -- $selected_subcommand
         fi
       # elif [[ -n "$artisan_arguments" ]]; then
