@@ -138,6 +138,7 @@ function _artisan() {
           if [[ "$selected_subcommand" == "$last_word"* ]]; then
             # Remove the last word
             words=("${words[@]:0:$((${#words[@]} - 1))}")
+            echo $words
           fi
 
           compadd -U -- $selected_subcommand
