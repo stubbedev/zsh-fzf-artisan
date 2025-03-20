@@ -139,7 +139,7 @@ function _artisan() {
       #     compadd -U -- $selected_argument
       #   fi
       elif [[ -n "$artisan_options" ]]; then
-        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
+        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
         if [[ -n "$selected_option" ]]; then
           compadd -U -- $selected_option
         fi
