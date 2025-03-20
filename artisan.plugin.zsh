@@ -41,6 +41,7 @@ function artisan() {
 }
 
 compdef _artisan artisan
+zle -N _artisan
 
 function _artisan_find() {
   # Look for artisan up the file tree until the root directory
@@ -99,7 +100,7 @@ function _artisan() {
       fi
 
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
-      local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
+      local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' --query=$last_word | awk '{print $1}')
       ret=$?
       if [ -n "$selected_command" ]; then
         compadd -U -- "$selected_command"
@@ -109,11 +110,14 @@ function _artisan() {
     ;;
   args)
     if [[ -n "$artisan_path" ]]; then
-
+      local last_word=$words[-1]
+      if [[ -z $last_word ]]; then
+        last_word=$words[-2]
+      fi
       local output=$(eval "$words --help 2>&1")
 
       # Subcommands
-      local artisan_subcommands=$(echo "$output" | awk '/^Available commands for the/{flag=1; next} flag && NF{print} !NF{flag=0}')
+      local artisan_subcommands=$(echo "$output" | awk '/^Available commands for the/{flag=1; next} flag && NF{print} !NF{flag=0}' | awk '!($0 ~ last_word ":")')
 
       # Arguments
       local artisan_arguments=$(echo "$output" | awk '/^Arguments:/{flag=1; next} flag && !/namespace/ && NF{print} !NF{flag=0}')
@@ -129,27 +133,12 @@ function _artisan() {
 
       # Complete subcommands, arguments, and options if they exist
       if [[ -n "$artisan_subcommands" ]]; then
-        local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' --query=$words[-1] | awk '{print $1}')
+        local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' --query=$last_word --header=$artisan_arguments | awk '{print $1}')
         if [[ -n "$selected_subcommand" ]]; then
-          # Extract the last word typed in the shell
-          local last_word="${words[-1]}"
-
-          # Check if the last word matches the beginning of the selected subcommand
-          if [[ "$selected_subcommand" == "$last_word"* ]]; then
-            # Remove the last word
-            words=("${words[@]:0:$((${#words[@]} - 1))}")
-            echo $words
-          fi
-
           compadd -U -- $selected_subcommand
         fi
-      # elif [[ -n "$artisan_arguments" ]]; then
-      #   local selected_argument=$(echo -e "$artisan_arguments" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Argument > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
-      #   if [[ -n "$selected_argument" ]]; then
-      #     compadd -U -- $selected_argument
-      #   fi
       elif [[ -n "$artisan_options" ]]; then
-        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' --header=$artisan_arguments | awk '{print $1}')
         if [[ -n "$selected_option" ]]; then
           compadd -U -- $selected_option
         fi
