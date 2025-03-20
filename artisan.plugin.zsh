@@ -110,7 +110,7 @@ function _artisan() {
   args)
     if [[ -n "$artisan_path" ]]; then
 
-      local output=$(eval "$words --help")
+      local output=$(eval "$words --help 2>&1")
 
       # Subcommands
       local artisan_subcommands=$(echo "$output" | awk '/^Available commands for the/{flag=1; next} flag && NF{print} !NF{flag=0}')
