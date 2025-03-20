@@ -109,26 +109,40 @@ function _artisan() {
     ;;
   args)
     if [[ -n "$artisan_path" ]]; then
-      local output=$(eval "$artisan_cmd $words[1] --help")
 
-      # Extract subcommands (if present)
-      local subcommands=$(echo "$output" | awk '/Available commands:/ {found=1; next} found && /^[[:space:]]+[a-zA-Z0-9:-]+/ {print $1}')
+      local output=$(eval "$words --help")
 
-      # Extract arguments (words that appear between 'Usage:' and 'Options:')
-      local arguments=$(echo "$output" | awk '/Usage:/ {found=1; next} /Options:/ {found=0} found && /^[[:space:]]+[^-][a-zA-Z0-9:_]+/ {print $1}')
+      # Subcommands
+      local artisan_subcommands=$(echo "$output" | awk '/^Available commands for the/{flag=1; next} flag && NF{print} !NF{flag=0}')
 
-      # Extract options (like --flags)
-      local options=$(echo "$output" | awk '/Options:/ {found=1; next} found && /^[[:space:]]+--?[a-zA-Z0-9|=:-]+/ {print $1}')
+      # # Extract arguments (words that appear between 'Usage:' and 'Options:')
+      # local artisan_arguments=$(echo "$output" | awk '/^Arguments:/{flag=1; next} flag && NF{print} !NF{flag=0}')
+
+      # Flags
+      local artisan_options=$(echo "$output" | awk '/^Options:/{flag=1; next} flag && NF{
+        match($0, /--[a-zA-Z0-9-]+/);
+        option = substr($0, RSTART, RLENGTH);
+        value = substr($0, RSTART + RLENGTH + 1);
+        trimmed_value = substr(value, index(value, " ") + 1)
+        print option, trimmed_value
+      } !NF{flag=0}')
 
       # Complete subcommands, arguments, and options if they exist
-      if [[ -n "$subcommands" ]]; then
-        compadd -U -- $subcommands
-      fi
-      if [[ -n "$arguments" ]]; then
-        compadd -U -- $arguments
-      fi
-      if [[ -n "$options" ]]; then
-        compadd -U -- $options
+      if [[ -n "$artisan_subcommands" ]]; then
+        local selected_subcommand=$(echo -e "$artisan_subcommands" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Subcommand > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+        if [[ -n "$selected_subcommand" ]]; then
+          compadd -U -- $selected_subcommand
+        fi
+      # elif [[ -n "$artisan_arguments" ]]; then
+      #   local selected_argument=$(echo -e "$artisan_arguments" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Argument > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+      #   if [[ -n "$selected_argument" ]]; then
+      #     compadd -U -- $selected_argument
+      #   fi
+      elif [[ -n "$artisan_options" ]]; then
+        local selected_option=$(echo -e "$artisan_options" | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Option > " --with-nth 1 --bind 'tab:accept' | awk '{print $1}')
+        if [[ -n "$selected_option" ]]; then
+          compadd -U -- $selected_option
+        fi
       fi
     fi
     ;;
