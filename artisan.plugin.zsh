@@ -104,6 +104,10 @@ function _artisan() {
         rm -f "$current_command_list"
       fi
 
+      if [[ $last_word = "artisan" ]]; then
+        last_word=""
+      fi
+
       # Adjusted fzf command to display descriptions, exclude '_complete', and take only the first line of the description
       local selected_command=$(cat "$cache_file" | grep -v '_complete' | fzf --preview 'echo {} | awk "{\$1=\"\"; print substr(\$0,2)}"' --preview-window=right:50%:wrap --height=40% --reverse --prompt="Artisan Command > " --with-nth 1 --bind 'tab:accept' --query=$last_word | awk '{print $1}')
       ret=$?
