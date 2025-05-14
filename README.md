@@ -43,7 +43,7 @@ This is a Zsh plugin that integrates Laravel's Artisan command-line tool with fz
   Example:
 
   ```sh
-  export ARTISAN_OPEN_ON_MAKE_EDITOR="nvim" # For Visual Studio Code
+  export ARTISAN_OPEN_ON_MAKE_EDITOR="code" # For Visual Studio Code
   ```
 
 ## Requirements
