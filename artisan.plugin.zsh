@@ -209,6 +209,9 @@ function _artisan() {
   # Shared project-level stamp — throttles the Commands glob across all cache operations.
   local cmd_stamp="${ARTISAN_CACHE_DIR}/${project_hash}.stamp"
 
+  # Ensure cache dir exists — it may have been removed after plugin load.
+  mkdir -p "$ARTISAN_CACHE_DIR"
+
   case $state in
   command)
     if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
@@ -219,8 +222,8 @@ function _artisan() {
     fi
 
     [[ $last_word = "artisan" ]] && last_word=""
-    # $(<file) reads without forking.
-    _artisan_complete "Artisan Command" "$last_word" "$(<"$cache_file")"
+    # $(<file) reads without forking. Guard against missing file (write may have failed).
+    [[ -s "$cache_file" ]] && _artisan_complete "Artisan Command" "$last_word" "$(<"$cache_file")"
     ;;
   args)
     local subcmd=$words[2]
