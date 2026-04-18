@@ -143,13 +143,14 @@ function _artisan_hash() {
     return
   fi
   local s="$1" c i
-  local -i h=5381
+  local -i h=5381 code
   for (( i = 1; i <= ${#s}; i++ )); do
     c="${s[i]}"
-    (( h = ((h << 5) + h + #c) & 0x7fffffff ))
+    # printf '%d' "'$c" gives the ASCII value of $c via POSIX 'c format — printf is a zsh builtin, no fork.
+    printf -v code '%d' "'$c"
+    (( h = ((h << 5) + h + code) & 0x7fffffff ))
   done
-  # [##16] converts to hex in arithmetic; (L) lowercases; (l:8::0:) zero-pads — all fork-free.
-  REPLY=${(l:8::0:)${(L)$(( [##16] h ))}}
+  REPLY=$(printf '%08x' $h)
   _ARTISAN_HASH_CACHE[$1]="$REPLY"
 }
 
@@ -212,7 +213,7 @@ function _artisan() {
   command)
     if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
       # Filter internal commands (e.g. _complete) at write time — avoids grep on every tab.
-      php "$artisan_path" list --format=json \
+      php "$artisan_path" list --format=json 2>/dev/null \
         | jq -r '.commands[] | select(.name | startswith("_") | not) | "\(.name)\t\(.description | gsub("\n"; " "))"' \
         >"$cache_file"
     fi
@@ -227,7 +228,7 @@ function _artisan() {
     local cmd_cache_file="${ARTISAN_CACHE_DIR}/${project_hash}_${subcmd_hash}.cmd"
 
     if _artisan_cache_stale "$cmd_cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
-      php "$artisan_path" help "$subcmd" --format=json >"$cmd_cache_file" 2>/dev/null
+      php "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
     fi
 
     # Empty file means $subcmd is a namespace prefix or unknown — fall back to
