@@ -103,7 +103,14 @@ function _artisan_complete() {
       --query="$query" \
       <<< "$items")
     selected=${selected%%$'\t'*}
-    [[ -n "$selected" ]] && compadd -U -- "$selected"
+    if [[ -n "$selected" ]]; then
+      # Suppress the auto-added space for options that take a value (end with =).
+      if [[ "$selected" == *= ]]; then
+        compadd -S '' -U -- "$selected"
+      else
+        compadd -U -- "$selected"
+      fi
+    fi
   else
     local -a entries
     while IFS=$'\t' read -r name desc; do
