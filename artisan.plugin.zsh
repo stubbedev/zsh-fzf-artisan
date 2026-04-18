@@ -191,9 +191,6 @@ function _artisan_cache_stale() {
 }
 
 function _artisan() {
-  local last_word=$words[-1]
-  [[ -z $last_word ]] && last_word=$words[-2]
-
   local state
 
   _arguments '1: :->command' '*: :->args'
@@ -218,6 +215,12 @@ function _artisan() {
 
   case $state in
   command)
+    # Use the partial word being typed, or fall back to previous word when cursor
+    # is on the command token itself (e.g. `artisan <cursor>`).
+    local last_word=$words[-1]
+    [[ $last_word = "artisan" || -z $last_word ]] && last_word=$words[-2]
+    [[ $last_word = "artisan" ]] && last_word=""
+
     if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
       # Filter internal commands (e.g. _complete) at write time — avoids grep on every tab.
       "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" list --format=json 2>/dev/null \
@@ -225,11 +228,13 @@ function _artisan() {
         >"$cache_file"
     fi
 
-    [[ $last_word = "artisan" ]] && last_word=""
     # $(<file) reads without forking. Guard against missing file (write may have failed).
     [[ -s "$cache_file" ]] && _artisan_complete "Artisan Command" "$last_word" "$(<"$cache_file")"
     ;;
   args)
+    # Use only the word currently being typed — no fallback to previous word.
+    local last_word=$words[-1]
+
     local subcmd=$words[2]
     _artisan_hash "$subcmd"; local subcmd_hash=$REPLY
     local cmd_cache_file="${ARTISAN_CACHE_DIR}/${project_hash}_${subcmd_hash}.cmd"
