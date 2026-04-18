@@ -253,24 +253,26 @@ function _artisan() {
     local items
     items=$(jq -r --argjson skip_args '["command"]' --argjson skip_opts "$_ARTISAN_GLOBAL_OPTS" '
       (
-        .arguments | to_entries[] |
+        (.definition.arguments // {}) | to_entries[] |
+        select(.value | type == "object") |
         select([.key] | inside($skip_args) | not) |
         "<" + .key +
           (if .value.is_array then "..." elif (.value.is_required | not) then "?" else "" end) +
-        ">" + "\t" + .value.description
+        ">" + "\t" + (.value.description // "")
       ),
       (
-        .options | to_entries[] |
+        (.definition.options // {}) | to_entries[] |
+        select(.value | type == "object") |
         select([.key] | inside($skip_opts) | not) |
         (
           (.value.name + (if .value.accept_value then "=" else "" end)) + "\t" +
           (if (.value.shortcut // "") != "" then "(" + .value.shortcut + ") " else "" end) +
-          .value.description
+          (.value.description // "")
         ),
         (
           select((.value.shortcut // "") != "") |
           (.value.shortcut + (if .value.accept_value then "=" else "" end)) + "\t" +
-          .value.description
+          (.value.description // "")
         )
       )
     ' "$cmd_cache_file" 2>/dev/null)
