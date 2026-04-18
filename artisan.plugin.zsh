@@ -29,6 +29,10 @@ else
   _artisan_jq_available() { return 1 }
 fi
 
+# Resolve PHP binary at load time — completion subshells may have a stripped PATH
+# (NixOS, Herd Lite, etc.) that doesn't include the same php as the interactive shell.
+_ARTISAN_PHP_BIN="${_ARTISAN_PHP_BIN:-$(command -v php 2>/dev/null)}"
+
 # Global options present on every artisan command — filtered from args completions.
 # Declared at load time so it is not reallocated on every tab press.
 typeset -gr _ARTISAN_GLOBAL_OPTS='["help","quiet","verbose","version","ansi","no-ansi","no-interaction","env"]'
@@ -48,7 +52,7 @@ function artisan() {
   # Use $EPOCHSECONDS (no fork) when zsh/datetime is loaded, else fall back to date.
   local artisan_start_time=${EPOCHSECONDS:-$(date +%s)}
 
-  php "$artisan_path" "$@"
+  "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" "$@"
 
   local artisan_exit_status=$?
 
@@ -216,7 +220,7 @@ function _artisan() {
   command)
     if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
       # Filter internal commands (e.g. _complete) at write time — avoids grep on every tab.
-      php "$artisan_path" list --format=json 2>/dev/null \
+      "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" list --format=json 2>/dev/null \
         | jq -r '.commands[] | select(.name | startswith("_") | not) | "\(.name)\t\(.description | gsub("\n"; " "))"' \
         >"$cache_file"
     fi
@@ -231,7 +235,7 @@ function _artisan() {
     local cmd_cache_file="${ARTISAN_CACHE_DIR}/${project_hash}_${subcmd_hash}.cmd"
 
     if _artisan_cache_stale "$cmd_cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
-      php "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
+      "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
     fi
 
     # Empty file means $subcmd is a namespace prefix or unknown — fall back to
