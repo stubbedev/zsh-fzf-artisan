@@ -264,13 +264,19 @@ function _artisan() {
     # Single jq pass: positional arguments + long options + shortcut aliases.
     local items
     items=$(jq -r --argjson skip_args '["command"]' --argjson skip_opts "$_ARTISAN_GLOBAL_OPTS" '
+      def hints(v):
+        (if (v.accept_value // false) and (v.is_value_required // true | not) then " [optional value]" else "" end) +
+        (if v.is_multiple // false then " [repeatable]" else "" end) +
+        (if (v.default != null and v.default != false and v.default != "" and (v.default | type) != "array")
+         then " (default: " + (v.default | tostring) + ")" else "" end);
       (
         (.definition.arguments // {}) | to_entries[] |
         select(.value | type == "object") |
         select([.key] | inside($skip_args) | not) |
         "<" + .key +
           (if .value.is_array then "..." elif (.value.is_required | not) then "?" else "" end) +
-        ">" + "\t" + (.value.description // "")
+        ">" + "\t" +
+        (.value.description // "") + hints(.value)
       ),
       (
         (.definition.options // {}) | to_entries[] |
@@ -279,12 +285,12 @@ function _artisan() {
         (
           (.value.name + (if .value.accept_value then "=" else "" end)) + "\t" +
           (if (.value.shortcut // "") != "" then "(" + .value.shortcut + ") " else "" end) +
-          (.value.description // "")
+          (.value.description // "") + hints(.value)
         ),
         (
           select((.value.shortcut // "") != "") |
           (.value.shortcut + (if .value.accept_value then "=" else "" end)) + "\t" +
-          (.value.description // "")
+          (.value.description // "") + hints(.value)
         )
       )
     ' "$cmd_cache_file" 2>/dev/null)
