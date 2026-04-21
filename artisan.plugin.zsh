@@ -83,6 +83,37 @@ function artisan() {
 
 compdef _artisan artisan
 
+# ./artisan — zsh strips path prefix for basename lookup, but register explicitly as fallback.
+compdef _artisan './artisan'
+
+# `php artisan ...` — find artisan in the word list and delegate.
+function _artisan_php_wrapper() {
+  local artisan_idx=0 i
+  for (( i = 2; i <= ${#words}; i++ )); do
+    if [[ "${words[$i]}" == "artisan" || "${words[$i]}" == *"/artisan" ]]; then
+      artisan_idx=$i
+      break
+    fi
+  done
+
+  if (( artisan_idx > 0 )); then
+    if (( CURRENT == artisan_idx )); then
+      # Cursor is on 'artisan' itself — show command list
+      words=("artisan" "")
+      CURRENT=2
+    else
+      # Cursor is past 'artisan' — complete subcommand/args
+      words=("artisan" "${words[@]:$artisan_idx}")
+      (( CURRENT -= artisan_idx - 1 ))
+    fi
+    _artisan
+    return
+  fi
+
+  _default
+}
+compdef _artisan_php_wrapper php
+
 # Present tab-separated "name\tdescription" items as completions.
 # With fzf: opens fuzzy picker. Without fzf: falls back to zsh _describe.
 function _artisan_complete() {
