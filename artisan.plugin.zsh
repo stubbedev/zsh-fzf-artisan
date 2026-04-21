@@ -112,12 +112,19 @@ function _artisan_complete() {
       fi
     fi
   else
-    local -a entries
+    local -a eq_names eq_descs reg_entries
     while IFS=$'\t' read -r name desc; do
       [[ -z "$name" ]] && continue
-      entries+=("${name}:${desc:-$name}")
+      if [[ "$name" == *= ]]; then
+        eq_names+=("$name")
+        eq_descs+=("${desc:-$name}")
+      else
+        reg_entries+=("${name/:/\\:}:${desc:-$name}")
+      fi
     done <<< "$items"
-    _describe "$prompt" entries -U
+    # Options ending with = need -S '' to suppress the auto-inserted trailing space.
+    [[ ${#eq_names} -gt 0 ]] && compadd -S '' -U -d eq_descs -- "${eq_names[@]}"
+    [[ ${#reg_entries} -gt 0 ]] && _describe "$prompt" reg_entries -U
   fi
 }
 
