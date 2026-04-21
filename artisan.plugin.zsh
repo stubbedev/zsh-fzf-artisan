@@ -97,16 +97,11 @@ function _artisan_php_wrapper() {
   done
 
   if (( artisan_idx > 0 )); then
-    if (( CURRENT == artisan_idx )); then
-      # Cursor is on 'artisan' itself — show command list
-      words=("artisan" "")
-      CURRENT=2
-    else
-      # Cursor is past 'artisan' — complete subcommand/args
+    if (( CURRENT > artisan_idx )); then
       words=("artisan" "${words[@]:$artisan_idx}")
       (( CURRENT -= artisan_idx - 1 ))
+      _artisan
     fi
-    _artisan
     return
   fi
 
