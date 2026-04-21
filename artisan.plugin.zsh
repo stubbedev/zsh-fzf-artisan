@@ -123,8 +123,8 @@ function _artisan_complete() {
       fi
     done <<< "$items"
     # Options ending with = need -S '' to suppress the auto-inserted trailing space.
-    [[ ${#eq_names} -gt 0 ]] && compadd -S '' -U -d eq_descs -- "${eq_names[@]}"
-    [[ ${#reg_entries} -gt 0 ]] && _describe "$prompt" reg_entries -U
+    [[ ${#eq_names} -gt 0 ]] && compadd -S '' -d eq_descs -- "${eq_names[@]}"
+    [[ ${#reg_entries} -gt 0 ]] && _describe "$prompt" reg_entries
   fi
 }
 
