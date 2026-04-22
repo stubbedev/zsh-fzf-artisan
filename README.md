@@ -115,8 +115,8 @@ export ARTISAN_CMD_CHECK_INTERVAL=30  # seconds
 ## How it works
 
 - Finds `artisan` by walking up the directory tree — no need to be in the project root
-- Caches the command list per project in `~/.cache/artisan` — completions are fast after the first tab press
-- Cache is invalidated automatically when `artisan` or `composer.lock` changes, or when you add new commands to `app/Console/Commands/`
+- Caches the command list per project in `~/.cache/artisan` and reuses the refresh interval immediately after a rebuild so repeated tab presses stay fast
+- Cache is invalidated automatically when `artisan` or `composer.lock` changes, or when Laravel command sources like `app/Console/Commands/`, `app/Console/Kernel.php`, `routes/console.php`, or `bootstrap/app.php` change
 
 ## License
 

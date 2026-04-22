@@ -41,6 +41,8 @@ typeset -gr _ARTISAN_GLOBAL_OPTS='["help","quiet","verbose","version","ansi","no
 typeset -gA _ARTISAN_FIND_CACHE
 # Per-string hash cache — pure-zsh hash only runs once per unique string per session.
 typeset -gA _ARTISAN_HASH_CACHE
+# Per-project command list cache — avoids disk reads on repeated command completion.
+typeset -gA _ARTISAN_LIST_CACHE
 
 function artisan() {
   _artisan_find || {
@@ -199,7 +201,7 @@ function _artisan_hash() {
 }
 
 # Return 0 (stale) if the cache file should be regenerated.
-# Checks: missing/empty, artisan newer, composer.lock newer, Commands glob (throttled).
+# Checks: missing/empty, artisan newer, composer.lock newer, Laravel command sources (throttled).
 # $cmd_stamp is a project-level file that records the last time the Commands glob ran clean.
 function _artisan_cache_stale() {
   local cache_file="$1" artisan_path="$2" project_dir="$3" composer_lock="$4" cmd_stamp="$5"
@@ -216,10 +218,15 @@ function _artisan_cache_stale() {
     (( now - stamp_time < ${ARTISAN_CMD_CHECK_INTERVAL:-10} )) && return 1
   fi
 
-  # Fork-free glob — excludes vendor, checks if any Commands file is newer than cache.
+  # Limit the scan to Laravel command sources instead of recursing through the whole
+  # project tree. This keeps macOS completions responsive on large repos.
   local -a cmd_files
-  cmd_files=($project_dir/**/Console/Commands/*.php(N-.))
-  cmd_files=(${cmd_files:#*/vendor/*})
+  cmd_files=(
+    $project_dir/app/**/Console/Commands/*.php(N-.)
+    $project_dir/app/Console/Kernel.php(N-.)
+    $project_dir/routes/console.php(N-.)
+    $project_dir/bootstrap/app.php(N-.)
+  )
   local f
   for f in $cmd_files; do
     [[ "$f" -nt "$cache_file" ]] && return 0
@@ -250,9 +257,6 @@ function _artisan() {
   # Shared project-level stamp — throttles the Commands glob across all cache operations.
   local cmd_stamp="${ARTISAN_CACHE_DIR}/${project_hash}.stamp"
 
-  # Ensure cache dir exists — it may have been removed after plugin load.
-  mkdir -p "$ARTISAN_CACHE_DIR"
-
   case $state in
   command)
     # Use the partial word being typed, or fall back to previous word when cursor
@@ -262,14 +266,21 @@ function _artisan() {
     [[ $last_word = "artisan" ]] && last_word=""
 
     if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
+      [[ -d "$ARTISAN_CACHE_DIR" ]] || mkdir -p "$ARTISAN_CACHE_DIR"
       # Filter internal commands (e.g. _complete) at write time — avoids grep on every tab.
       "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" list --format=json 2>/dev/null \
         | jq -r '.commands[] | select(.name | startswith("_") | not) | "\(.name)\t\(.description | gsub("\n"; " "))"' \
         >"$cache_file"
+      (( ${EPOCHSECONDS:-0} > 0 && -s $cache_file )) && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
+      _ARTISAN_LIST_CACHE[$project_hash]=""
     fi
 
-    # $(<file) reads without forking. Guard against missing file (write may have failed).
-    [[ -s "$cache_file" ]] && _artisan_complete "Artisan Command" "$last_word" "$(<"$cache_file")"
+    if [[ -z "${_ARTISAN_LIST_CACHE[$project_hash]-}" && -s "$cache_file" ]]; then
+      # $(<file) reads without forking. Cache in-memory for repeated completion calls.
+      _ARTISAN_LIST_CACHE[$project_hash]="$(<"$cache_file")"
+    fi
+
+    [[ -n "${_ARTISAN_LIST_CACHE[$project_hash]-}" ]] && _artisan_complete "Artisan Command" "$last_word" "${_ARTISAN_LIST_CACHE[$project_hash]}"
     ;;
   args)
     # Use only the word currently being typed — no fallback to previous word.
@@ -280,7 +291,9 @@ function _artisan() {
     local cmd_cache_file="${ARTISAN_CACHE_DIR}/${project_hash}_${subcmd_hash}.cmd"
 
     if _artisan_cache_stale "$cmd_cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
+      [[ -d "$ARTISAN_CACHE_DIR" ]] || mkdir -p "$ARTISAN_CACHE_DIR"
       "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
+      (( ${EPOCHSECONDS:-0} > 0 && -s $cmd_cache_file )) && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
     fi
 
     # Empty file means $subcmd is a namespace prefix or unknown — fall back to
