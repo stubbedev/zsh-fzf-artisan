@@ -133,17 +133,24 @@ function _artisan_complete() {
     selected=${selected%%$'\t'*}
     if [[ -n "$selected" ]]; then
       # Suppress the auto-added space for options that take a value (end with =).
-      if [[ "$selected" == *= ]]; then
+      if [[ "$selected" == '<'* ]]; then
+        # Positional argument placeholder — insert "" with cursor between the quotes.
+        LBUFFER+='""'
+        (( CURSOR-- ))
+      elif [[ "$selected" == *= ]]; then
         compadd -S '' -U -- "$selected"
       else
         compadd -U -- "$selected"
       fi
     fi
   else
-    local -a eq_names eq_descs reg_entries
+    local -a eq_names eq_descs reg_entries pos_vals pos_disps
     while IFS=$'\t' read -r name desc; do
       [[ -z "$name" ]] && continue
-      if [[ "$name" == *= ]]; then
+      if [[ "$name" == '<'* ]]; then
+        pos_vals+=('""')
+        pos_disps+=("$name")
+      elif [[ "$name" == *= ]]; then
         eq_names+=("$name")
         eq_descs+=("${desc:-$name}")
       else
@@ -153,6 +160,8 @@ function _artisan_complete() {
     # Options ending with = need -S '' to suppress the auto-inserted trailing space.
     [[ ${#eq_names} -gt 0 ]] && compadd -S '' -d eq_descs -- "${eq_names[@]}"
     [[ ${#reg_entries} -gt 0 ]] && _describe "$prompt" reg_entries
+    # Positional args: insert "" so the user can type the value directly; -Q prevents quote-escaping.
+    [[ ${#pos_vals} -gt 0 ]] && compadd -Q -S '' -d pos_disps -U -- "${pos_vals[@]}"
   fi
 }
 
