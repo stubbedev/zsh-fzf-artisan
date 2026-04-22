@@ -271,7 +271,7 @@ function _artisan() {
       "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" list --format=json 2>/dev/null \
         | jq -r '.commands[] | select(.name | startswith("_") | not) | "\(.name)\t\(.description | gsub("\n"; " "))"' \
         >"$cache_file"
-      (( ${EPOCHSECONDS:-0} > 0 && -s $cache_file )) && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
+      [[ ${EPOCHSECONDS:-0} -gt 0 && -s "$cache_file" ]] && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
       _ARTISAN_LIST_CACHE[$project_hash]=""
     fi
 
@@ -293,7 +293,7 @@ function _artisan() {
     if _artisan_cache_stale "$cmd_cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
       [[ -d "$ARTISAN_CACHE_DIR" ]] || mkdir -p "$ARTISAN_CACHE_DIR"
       "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
-      (( ${EPOCHSECONDS:-0} > 0 && -s $cmd_cache_file )) && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
+      [[ ${EPOCHSECONDS:-0} -gt 0 && -s "$cmd_cache_file" ]] && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
     fi
 
     # Empty file means $subcmd is a namespace prefix or unknown — fall back to
