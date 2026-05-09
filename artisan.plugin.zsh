@@ -34,8 +34,11 @@ fi
 _ARTISAN_PHP_BIN="${_ARTISAN_PHP_BIN:-$(command -v php 2>/dev/null)}"
 
 # Global options present on every artisan command — filtered from args completions.
-# Declared at load time so it is not reallocated on every tab press.
-typeset -gr _ARTISAN_GLOBAL_OPTS='["help","quiet","verbose","version","ansi","no-ansi","no-interaction","env"]'
+# Declared at load time so it is not reallocated on every tab press. Guarded
+# with `${+var}` so re-sourcing ~/.zshrc (e.g. after a config tweak) doesn't
+# trip `read-only variable: _ARTISAN_GLOBAL_OPTS`.
+(( ${+_ARTISAN_GLOBAL_OPTS} )) || \
+  typeset -gr _ARTISAN_GLOBAL_OPTS='["help","quiet","verbose","version","ansi","no-ansi","no-interaction","env"]'
 
 # Per-$PWD artisan path cache — avoids directory walk on repeated tab presses.
 typeset -gA _ARTISAN_FIND_CACHE
