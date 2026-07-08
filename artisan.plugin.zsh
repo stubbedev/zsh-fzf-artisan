@@ -15,6 +15,11 @@
 ARTISAN_CACHE_DIR="${HOME}/.cache/artisan"
 mkdir -p "$ARTISAN_CACHE_DIR"
 
+# Downloaded binary lives under the (writable) cache dir — NOT the plugin dir,
+# which is often read-only (Nix store, system oh-my-zsh, Homebrew). Writing it
+# there is what left installs stuck on "downloading" forever.
+typeset -g _ARTISAN_BIN_DIR="${ARTISAN_CACHE_DIR}/bin"
+
 # Load zsh/datetime for $EPOCHSECONDS and strftime — used for cross-platform
 # timestamp handling in the make: editor hook. Silent load.
 zmodload -s zsh/datetime
@@ -57,8 +62,9 @@ function _artisan_wanted_version() {
 
 function _artisan_locate_binary() {
   local c
-  # target/release is a local dev build escape hatch (unsupported platforms).
-  for c in "$_ARTISAN_PLUGIN_DIR/bin/artisan-comp" "$_ARTISAN_PLUGIN_DIR/target/release/artisan-comp"; do
+  # Prefer the downloaded binary in the cache dir; then one committed to the
+  # plugin's bin/; then a local dev build (target/release, unsupported platforms).
+  for c in "$_ARTISAN_BIN_DIR/artisan-comp" "$_ARTISAN_PLUGIN_DIR/bin/artisan-comp" "$_ARTISAN_PLUGIN_DIR/target/release/artisan-comp"; do
     if [[ -x "$c" ]]; then
       _ARTISAN_COMP_BIN="$c"
       return 0
@@ -76,22 +82,32 @@ function _artisan_ensure_binary() {
   local wanted=$REPLY
 
   if _artisan_locate_binary; then
-    # Dev builds in target/release are left alone; only bin/ is managed.
-    [[ "$_ARTISAN_COMP_BIN" != "$_ARTISAN_PLUGIN_DIR/bin/"* ]] && return 0
-    # Fork-free version check: the downloader stamps bin/.version. Fall back
-    # to one exec (and backfill the stamp) if it's missing.
-    local vfile="$_ARTISAN_PLUGIN_DIR/bin/.version" have=""
-    if [[ -f "$vfile" ]]; then
+    # Dev build (target/release) is a local escape hatch — never touched.
+    [[ "$_ARTISAN_COMP_BIN" == "$_ARTISAN_PLUGIN_DIR/target/release/"* ]] && return 0
+    # Version-check the rest. The downloaded copy records its version in a
+    # stamp (fork-free); a committed plugin binary has none, so ask it once.
+    local vfile="" have=""
+    [[ "$_ARTISAN_COMP_BIN" == "$_ARTISAN_BIN_DIR/"* ]] && vfile="$_ARTISAN_BIN_DIR/.version"
+    if [[ -n "$vfile" && -f "$vfile" ]]; then
       have="$(<$vfile)"
     else
       have=$("$_ARTISAN_COMP_BIN" version 2>/dev/null)
-      [[ -n "$have" ]] && print -r -- "$have" >"$vfile" 2>/dev/null
+      [[ -n "$have" && -n "$vfile" ]] && print -r -- "$have" >"$vfile" 2>/dev/null
     fi
+    # Match → keep it. Mismatch → fall through and (re)download into the cache.
     [[ "$have" == "$wanted" ]] && return 0
   fi
 
+  # The stamp throttles retries so a failing download isn't re-attempted on
+  # every tab press. It is NOT a permanent block: failures are often transient
+  # (offline, release not published yet), so retry once the TTL lapses. This
+  # self-heals without a git pull. Success (below) deletes the stamp outright.
   local stamp="$ARTISAN_CACHE_DIR/download.stamp"
-  [[ -f "$stamp" && "$(<$stamp)" == "$wanted" ]] && return 1
+  if [[ -f "$stamp" ]]; then
+    local sver sts
+    read -r sver sts <"$stamp"
+    (( ${EPOCHSECONDS:-0} - ${sts:-0} < 3600 )) && [[ "$sver" == "$wanted" ]] && return 1
+  fi
 
   local os arch
   case "$OSTYPE" in
@@ -105,14 +121,14 @@ function _artisan_ensure_binary() {
     *) return 1 ;;
   esac
 
-  print -r -- "$wanted" >"$stamp"
+  print -r -- "$wanted ${EPOCHSECONDS:-0}" >"$stamp"
   >&2 echo "zsh-fzf-artisan: downloading artisan-comp v${wanted} (${arch}-${os}) in background"
   (
     local base="https://github.com/${_ARTISAN_REPO}/releases/download/v${wanted}/artisan-comp-${arch}-${os}"
-    local dest="$_ARTISAN_PLUGIN_DIR/bin/artisan-comp"
-    local tmp="$_ARTISAN_PLUGIN_DIR/bin/.artisan-comp.$$.$RANDOM"
+    local dest="$_ARTISAN_BIN_DIR/artisan-comp"
+    local tmp="$_ARTISAN_BIN_DIR/.artisan-comp.$$.$RANDOM"
     local sum="$tmp.sha256"
-    mkdir -p "$_ARTISAN_PLUGIN_DIR/bin"
+    mkdir -p "$_ARTISAN_BIN_DIR"
 
     local fetch
     if command -v curl >/dev/null 2>&1; then
@@ -144,7 +160,7 @@ function _artisan_ensure_binary() {
     # Only install a binary that also runs and reports the expected version.
     if [[ "$("$tmp" version 2>/dev/null)" == "$wanted" ]]; then
       mv -f "$tmp" "$dest"
-      print -r -- "$wanted" >"$_ARTISAN_PLUGIN_DIR/bin/.version"
+      print -r -- "$wanted" >"$_ARTISAN_BIN_DIR/.version"
       rm -f "$stamp"
     else
       rm -f "$tmp"
