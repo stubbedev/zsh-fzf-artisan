@@ -163,29 +163,82 @@ fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) {
     *out = ctx.out;
 }
 
-/// `use App\Enums\Source;` / `use App\Enums\Source as Src;` → short name → FQN.
-/// ponytail: line-based, group imports (`use X\{A, B}`) not expanded.
+/// Maps imported short name → FQN. Handles plain (`use App\Enums\Source;`),
+/// aliased (`... as Src;`), and group imports — including multi-line ones:
+/// `use App\Enums\{Color, Shape as S};`.
 fn parse_uses(src: &[u8]) -> HashMap<String, String> {
     let text = String::from_utf8_lossy(src);
     let mut map = HashMap::new();
+    // Accumulate `use ... ;` statements, which may span several lines (a group
+    // import with one entry per line). Buffering starts at a line beginning with
+    // `use ` and ends at the line containing the terminating `;`.
+    let mut buf = String::new();
     for line in text.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("use ") else {
-            continue;
-        };
-        let Some(rest) = rest.strip_suffix(';') else {
-            continue;
-        };
-        if rest.contains('{') || rest.starts_with("function ") || rest.starts_with("const ") {
-            continue;
+        if buf.is_empty() {
+            if !line.starts_with("use ") {
+                continue;
+            }
+            buf.push_str(line);
+        } else {
+            buf.push(' ');
+            buf.push_str(line);
         }
-        let (fqn, alias) = match rest.split_once(" as ") {
-            Some((f, a)) => (f.trim(), a.trim()),
-            None => (rest.trim(), rest.trim().rsplit('\\').next().unwrap_or(rest)),
-        };
-        map.insert(alias.to_string(), fqn.trim_start_matches('\\').to_string());
+        if buf.ends_with(';') {
+            parse_use_stmt(&buf, &mut map);
+            buf.clear();
+        } else if buf.len() > 4096 {
+            buf.clear(); // runaway (missing `;`) — bail rather than grow unbounded
+        }
     }
     map
+}
+
+/// Parse one `use ... ;` statement into the alias map, expanding `{...}` groups.
+fn parse_use_stmt(stmt: &str, map: &mut HashMap<String, String>) {
+    let rest = stmt
+        .strip_prefix("use ")
+        .unwrap_or(stmt)
+        .trim()
+        .trim_end_matches(';')
+        .trim();
+    if rest.starts_with("function ") || rest.starts_with("const ") {
+        return;
+    }
+    let mut insert = |name: &str, alias: Option<&str>| {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let alias = alias
+            .map(str::trim)
+            .unwrap_or_else(|| name.rsplit('\\').next().unwrap_or(name));
+        map.insert(
+            alias.to_string(),
+            name.trim_start_matches('\\').to_string(),
+        );
+    };
+    let split_alias = |item: &str| -> (String, Option<String>) {
+        match item.split_once(" as ") {
+            Some((n, a)) => (n.trim().to_string(), Some(a.trim().to_string())),
+            None => (item.trim().to_string(), None),
+        }
+    };
+    // Group import: `Prefix\{A, B as C}` → expand each entry against the prefix.
+    if let Some(brace) = rest.find('{') {
+        let prefix = rest[..brace].trim().trim_end_matches('\\');
+        let inner = rest[brace + 1..].trim_end().trim_end_matches('}');
+        for entry in inner.split(',') {
+            let (name, alias) = split_alias(entry);
+            if name.is_empty() {
+                continue;
+            }
+            insert(&format!("{prefix}\\{name}"), alias.as_deref());
+        }
+    } else {
+        let (name, alias) = split_alias(rest);
+        insert(&name, alias.as_deref());
+    }
 }
 
 struct Ctx {
@@ -1259,6 +1312,65 @@ class Embed extends Command
         let ty = &out[&(Kind::Option, "type".to_string())];
         for v in ["images", "documents"] {
             assert!(ty.iter().any(|s| s == v), "missing type {v}: {ty:?}");
+        }
+    }
+
+    #[test]
+    fn resolves_enum_imported_via_group_use() {
+        // Enum imported through a multi-line group `use App\Enums\{ ... };`,
+        // referenced under an alias. Both the group expansion and the alias must
+        // resolve so Color::cases() reaches the enum file.
+        let dir =
+            std::env::temp_dir().join(format!("artisan-comp-group-test-{}", std::process::id()));
+        let enums = dir.join("app/Enums");
+        fs::create_dir_all(&enums).unwrap();
+        fs::write(
+            enums.join("Color.php"),
+            r#"<?php
+
+namespace App\Enums;
+
+enum Color: string
+{
+    case Red = 'red';
+    case Green = 'green';
+    case Blue = 'blue';
+}
+"#,
+        )
+        .unwrap();
+
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use App\Enums\{
+    Color as Colour,
+    Shape,
+};
+use Illuminate\Console\Command;
+
+class Paint extends Command
+{
+    protected $signature = 'app:paint {--color=}';
+
+    public function handle(): int
+    {
+        if (!in_array($this->option('color'), Colour::cases())) {
+            return 1;
+        }
+
+        return 0;
+    }
+}
+"#;
+        let mut out = Values::new();
+        extract_from(cmd.as_bytes(), &dir, &mut out);
+        let _ = fs::remove_dir_all(&dir);
+
+        let color = &out[&(Kind::Option, "color".to_string())];
+        for v in ["red", "green", "blue"] {
+            assert!(color.iter().any(|s| s == v), "missing color {v}: {color:?}");
         }
     }
 }
