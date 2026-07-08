@@ -213,10 +213,7 @@ fn parse_use_stmt(stmt: &str, map: &mut HashMap<String, String>) {
         let alias = alias
             .map(str::trim)
             .unwrap_or_else(|| name.rsplit('\\').next().unwrap_or(name));
-        map.insert(
-            alias.to_string(),
-            name.trim_start_matches('\\').to_string(),
-        );
+        map.insert(alias.to_string(), name.trim_start_matches('\\').to_string());
     };
     let split_alias = |item: &str| -> (String, Option<String>) {
         match item.split_once(" as ") {
