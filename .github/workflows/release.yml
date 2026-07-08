@@ -64,7 +64,7 @@ jobs:
           else
             shasum -a 256 "$asset" > "$asset.sha256"
           fi
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: |
             artisan-comp-${{ matrix.target }}
