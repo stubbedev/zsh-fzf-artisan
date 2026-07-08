@@ -16,9 +16,10 @@ use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 
@@ -43,10 +44,23 @@ pub(crate) struct Project {
     pub dir: PathBuf,
 }
 
+/// Background-refresh mode. In the foreground (`complete`) a present cache is
+/// served as-is with no source walk — the tab press never blocks. When the
+/// cache is past its freshness window we re-exec ourselves as `refresh` with
+/// the same args; that run sets this flag so `is_stale` does the real walk and
+/// regenerates the exact caches this completion touched.
+static REFRESH_MODE: AtomicBool = AtomicBool::new(false);
+
+fn refreshing() -> bool {
+    REFRESH_MODE.load(Ordering::Relaxed)
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    match args.first().map(String::as_str) {
-        Some("complete") => {}
+    let refresh = match args.first().map(String::as_str) {
+        Some("complete") => false,
+        // Internal: background revalidation, same args as `complete`.
+        Some("refresh") => true,
         Some("version") => {
             println!("{}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
@@ -55,7 +69,7 @@ fn main() -> ExitCode {
             eprintln!("usage: artisan-comp complete --cwd DIR --current N -- WORDS...");
             return ExitCode::from(2);
         }
-    }
+    };
 
     let mut cwd = None;
     let mut current = 0usize;
@@ -77,6 +91,14 @@ fn main() -> ExitCode {
     let Some(cwd) = cwd else {
         return ExitCode::FAILURE;
     };
+
+    if refresh {
+        REFRESH_MODE.store(true, Ordering::Relaxed);
+        // Regenerate stale caches, discard output. Best-effort — no exit code.
+        let _ = run(&cwd, current, &words);
+        return ExitCode::SUCCESS;
+    }
+
     match run(&cwd, current, &words) {
         Some(output) => {
             let mut stdout = std::io::stdout().lock();
@@ -94,11 +116,50 @@ fn run(cwd: &Path, current: usize, words: &[String]) -> Option<String> {
     prune_cache(&cache_dir);
     let project_hash = fnv_hex(project.dir.as_os_str().as_encoded_bytes());
 
-    if current <= 2 {
+    let out = if current <= 2 {
         complete_commands(&project, &cache_dir, &project_hash)
     } else {
         complete_args(&project, &cache_dir, &project_hash, current, words)
+    };
+
+    // Served from cache without a walk — kick a gated background revalidation
+    // so the next tab reflects any edits. Skipped when we ARE that refresh.
+    if !refreshing() {
+        maybe_spawn_refresh(&cache_dir, &project_hash, cwd, current, words);
     }
+    out
+}
+
+/// Spawn a detached `refresh` run at most once per FRESH_TTL per project, so
+/// rapid tabs don't fork a swarm of revalidators. A stamp file's mtime gates it.
+fn maybe_spawn_refresh(
+    cache_dir: &Path,
+    project_hash: &str,
+    cwd: &Path,
+    current: usize,
+    words: &[String],
+) {
+    let stamp = cache_dir.join(format!("{project_hash}.refresh"));
+    if mtime(&stamp).is_some_and(|t| t.elapsed().is_ok_and(|e| e < FRESH_TTL)) {
+        return;
+    }
+    // Touch the stamp first so concurrent/next tabs don't also spawn.
+    let _ = fs::write(&stamp, b"");
+    let Ok(exe) = env::current_exe() else {
+        return;
+    };
+    let _ = Command::new(exe)
+        .arg("refresh")
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--current")
+        .arg(current.to_string())
+        .arg("--")
+        .args(words)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
 }
 
 /// Delete cache entries not touched in 30 days so `~/.cache/artisan` doesn't
@@ -149,9 +210,11 @@ fn complete_commands(project: &Project, cache_dir: &Path, project_hash: &str) ->
 /// `help` boots are ever needed.
 fn load_list(project: &Project, cache_dir: &Path, project_hash: &str) -> Option<Value> {
     let cache_file = cache_dir.join(format!("{project_hash}.list.json"));
-    let raw = ensure_cache(&cache_file, newest_command_source(project), || {
-        php_run(project, &["list", "--format=json"])
-    })?;
+    let raw = ensure_cache(
+        &cache_file,
+        || newest_command_source(project),
+        || php_run(project, &["list", "--format=json"]),
+    )?;
     serde_json::from_slice(&raw).ok()
 }
 
@@ -159,7 +222,7 @@ fn load_list(project: &Project, cache_dir: &Path, project_hash: &str) -> Option<
 /// source directory changes — so config/test parsing runs on change, not per tab.
 fn load_catalog(project: &Project, cache_dir: &Path, project_hash: &str) -> wellknown::Catalog {
     let cache_file = cache_dir.join(format!("{project_hash}.catalog"));
-    if !is_stale(&cache_file, newest_catalog_source(project)) {
+    if !is_stale(&cache_file, || newest_catalog_source(project)) {
         if let Ok(text) = fs::read_to_string(&cache_file) {
             return wellknown::Catalog::from_tsv(&text);
         }
@@ -198,7 +261,7 @@ fn load_values(
         "{project_hash}_{}.vals",
         fnv_hex(subcmd.as_bytes())
     ));
-    if !is_stale(&cache_file, newest_command_source(project)) {
+    if !is_stale(&cache_file, || newest_command_source(project)) {
         if let Ok(text) = fs::read_to_string(&cache_file) {
             let mut vals = values::Values::new();
             for line in text.lines().filter(|l| !l.starts_with('#')) {
@@ -532,9 +595,15 @@ fn option_used(prior_words: &[&str], name: &str, shortcut: &str) -> bool {
 /// Return cache contents, regenerating when stale relative to `newest` (the
 /// newest mtime of the sources this cache depends on). A regeneration failure
 /// falls back to the existing cache file if one is present.
+/// How often a project may spawn a background revalidation. The source walk
+/// (stat-ing thousands of files under app/ and tests/) dominated tab latency,
+/// so it no longer runs in the foreground at all — this only rate-limits the
+/// detached `refresh` so rapid tabs don't fork a swarm of them.
+const FRESH_TTL: Duration = Duration::from_secs(3);
+
 fn ensure_cache(
     cache_file: &Path,
-    newest: Option<SystemTime>,
+    newest: impl FnOnce() -> Option<SystemTime>,
     regen: impl FnOnce() -> Option<Vec<u8>>,
 ) -> Option<Vec<u8>> {
     if !is_stale(cache_file, newest) {
@@ -549,18 +618,25 @@ fn ensure_cache(
     }
 }
 
-/// Stale when the cache is missing/empty or any watched source is newer.
-fn is_stale(cache_file: &Path, newest: Option<SystemTime>) -> bool {
-    let Some(cache_time) = mtime(cache_file) else {
+/// Stale when the cache is missing/empty, or — only in background refresh mode
+/// — when a watched source is newer. In the foreground a present, non-empty
+/// cache is NEVER stale: the tab press serves it and never walks the source
+/// tree. Freshness is restored by the detached `refresh` run (which sets
+/// REFRESH_MODE), so an edit shows up on the tab after the one that spawned it.
+fn is_stale(cache_file: &Path, newest: impl FnOnce() -> Option<SystemTime>) -> bool {
+    let Ok(meta) = fs::metadata(cache_file) else {
         return true;
     };
-    if fs::metadata(cache_file)
-        .map(|m| m.len() == 0)
-        .unwrap_or(true)
-    {
+    if meta.len() == 0 {
         return true;
     }
-    newest.is_some_and(|src| src > cache_time)
+    if !refreshing() {
+        return false;
+    }
+    let Ok(cache_time) = meta.modified() else {
+        return true;
+    };
+    newest().is_some_and(|src| src > cache_time)
 }
 
 /// Newest mtime of command-definition sources (drives the list.json and .vals
@@ -755,6 +831,39 @@ mod tests {
         let (filled, positional_only) = scan_prior_words(&["--", "-x", "value"], takes_value);
         assert_eq!(filled, 2);
         assert!(positional_only);
+    }
+
+    #[test]
+    fn foreground_serves_cache_without_walking() {
+        let dir = env::temp_dir().join(format!("artisan-comp-stale-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let cache = dir.join("x.list.json");
+        fs::write(&cache, b"cached").unwrap();
+
+        // Foreground (serve) mode: a present cache is never stale, and the
+        // source walk closure must not be invoked at all.
+        REFRESH_MODE.store(false, Ordering::Relaxed);
+        let mut walked = false;
+        let stale = is_stale(&cache, || {
+            walked = true;
+            Some(SystemTime::now())
+        });
+        assert!(!stale, "present cache must not be stale in the foreground");
+        assert!(!walked, "foreground must never walk the source tree");
+
+        // Background refresh mode: the walk runs and a newer source is stale.
+        REFRESH_MODE.store(true, Ordering::Relaxed);
+        let future = SystemTime::now() + Duration::from_secs(3600);
+        let mut walked2 = false;
+        let stale2 = is_stale(&cache, || {
+            walked2 = true;
+            Some(future)
+        });
+        assert!(walked2, "refresh mode must consult the source walk");
+        assert!(stale2, "a source newer than the cache must be stale");
+
+        REFRESH_MODE.store(false, Ordering::Relaxed);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
