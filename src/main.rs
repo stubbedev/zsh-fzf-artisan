@@ -114,7 +114,14 @@ fn run(cwd: &Path, current: usize, words: &[String]) -> Option<String> {
     let cache_dir = cache_dir();
     let _ = fs::create_dir_all(&cache_dir);
     prune_cache(&cache_dir);
-    let project_hash = fnv_hex(project.dir.as_os_str().as_encoded_bytes());
+    // Key the cache by project dir AND binary version. Extraction logic changes
+    // between versions, so a cache written by an older binary would otherwise be
+    // served forever (it stays "fresh" by source mtime). Bumping the version
+    // changes every derived filename; the stale files are pruned after 30 days.
+    let mut hash_input = project.dir.as_os_str().as_encoded_bytes().to_vec();
+    hash_input.push(0);
+    hash_input.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+    let project_hash = fnv_hex(&hash_input);
 
     let out = if current <= 2 {
         complete_commands(&project, &cache_dir, &project_hash)
