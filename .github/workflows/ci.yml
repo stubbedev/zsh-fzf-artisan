@@ -1,0 +1,54 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Test
+        run: cargo test
+
+  laravel-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+      - name: Build engine
+        run: cargo build --release
+      - name: Scaffold a real Laravel app
+        run: composer create-project --no-interaction --prefer-dist laravel/laravel app
+      - name: Completions run against real artisan JSON
+        run: |
+          bin=target/release/artisan-comp
+          # Command list: real artisan must yield real commands.
+          cmds=$("$bin" complete --cwd app --current 2 -- artisan "")
+          echo "$cmds" | head -20
+          for expect in migrate "make:model" "route:list" "config:show"; do
+            echo "$cmds" | grep -q "^$expect" || { echo "missing command: $expect"; exit 1; }
+          done
+          # Argument/option listing for a real command with no extra php boot.
+          args=$("$bin" complete --cwd app --current 3 -- artisan make:model "")
+          echo "$args" | head -20
+          echo "$args" | grep -q '^--' || { echo "no options listed for make:model"; exit 1; }
+          # Well-known catalog: default Laravel ships User; --model= should offer it.
+          models=$("$bin" complete --cwd app --current 3 -- artisan make:controller '--model=')
+          echo "$models"
+          echo "$models" | grep -q 'User' || { echo "expected User model in --model= completion"; exit 1; }
+          echo "laravel smoke ok"

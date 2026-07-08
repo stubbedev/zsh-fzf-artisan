@@ -113,7 +113,9 @@ impl Catalog {
     pub fn from_tsv(text: &str) -> Self {
         let mut c = Catalog::default();
         for line in text.lines().filter(|l| !l.starts_with('#')) {
-            let Some((tag, value)) = line.split_once('\t') else { continue };
+            let Some((tag, value)) = line.split_once('\t') else {
+                continue;
+            };
             let bucket = match tag {
                 "model" => &mut c.models,
                 "seeder" => &mut c.seeders,
@@ -140,7 +142,9 @@ impl Catalog {
 /// Recurse `dir`, calling `f` with each `.php` file path. Uses `file_type()`
 /// (no extra stat per entry) and skips dot-dirs, vendor, and node_modules.
 fn for_each_php(dir: &Path, f: &mut impl FnMut(&Path)) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else { continue };
         if ft.is_dir() {
@@ -223,11 +227,15 @@ fn class_fqns(src: &[u8]) -> Vec<String> {
 /// Top-level string keys of `<top_key> => [...]` inside a config file's
 /// returned array, e.g. the connection names in config/database.php.
 fn config_keys(project_dir: &Path, rel: &str, top_key: &str) -> Vec<String> {
-    let Ok(src) = fs::read(project_dir.join(rel)) else { return Vec::new() };
+    let Ok(src) = fs::read(project_dir.join(rel)) else {
+        return Vec::new();
+    };
     let arena = LocalArena::new();
     let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"c.php"), &src);
     for stmt in program.statements.as_slice() {
-        let Statement::Return(ret) = stmt else { continue };
+        let Statement::Return(ret) = stmt else {
+            continue;
+        };
         let Some(value) = ret.value else { continue };
         if let Some(keys) = nested_keys(unparen(value), top_key) {
             return keys;
@@ -238,7 +246,9 @@ fn config_keys(project_dir: &Path, rel: &str, top_key: &str) -> Vec<String> {
 
 fn nested_keys(expr: &Expression, top_key: &str) -> Option<Vec<String>> {
     for element in array_elements(expr)? {
-        let ArrayElement::KeyValue(kv) = element else { continue };
+        let ArrayElement::KeyValue(kv) = element else {
+            continue;
+        };
         if lit_str(kv.key).as_deref() != Some(top_key) {
             continue;
         }
@@ -260,19 +270,22 @@ fn nested_keys(expr: &Expression, top_key: &str) -> Option<Vec<String>> {
 /// `database.connections.mysql`. Used for `config:show`. No cap — config trees
 /// are bounded in practice and the result is cached.
 fn config_dotted_keys(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut out: BTreeSet<String> = BTreeSet::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "php") {
+        if path.extension().is_none_or(|e| e != "php") {
             continue;
         }
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         let Ok(src) = fs::read(&path) else { continue };
         out.insert(stem.to_string());
         let arena = LocalArena::new();
-        let program =
-            mago_syntax::parser::parse_file_content(&arena, FileId::new(b"c.php"), &src);
+        let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"c.php"), &src);
         for stmt in program.statements.as_slice() {
             if let Statement::Return(ret) = stmt {
                 if let Some(value) = ret.value {
@@ -285,9 +298,13 @@ fn config_dotted_keys(dir: &Path) -> Vec<String> {
 }
 
 fn emit_dotted(expr: &Expression, prefix: &str, out: &mut BTreeSet<String>) {
-    let Some(elements) = array_elements(expr) else { return };
+    let Some(elements) = array_elements(expr) else {
+        return;
+    };
     for element in elements {
-        let ArrayElement::KeyValue(kv) = element else { continue };
+        let ArrayElement::KeyValue(kv) = element else {
+            continue;
+        };
         let Some(key) = lit_str(kv.key) else { continue };
         let dotted = format!("{prefix}.{key}");
         emit_dotted(unparen(kv.value), &dotted, out);
@@ -298,13 +315,16 @@ fn emit_dotted(expr: &Expression, prefix: &str, out: &mut BTreeSet<String>) {
 // --- migrations / env ------------------------------------------------------
 
 fn migration_paths(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
     let mut out: Vec<String> = entries
         .flatten()
         .filter_map(|e| {
             let name = e.file_name();
             let name = name.to_string_lossy();
-            name.ends_with(".php").then(|| format!("database/migrations/{name}"))
+            name.ends_with(".php")
+                .then(|| format!("database/migrations/{name}"))
         })
         .collect();
     out.sort();
@@ -312,7 +332,9 @@ fn migration_paths(dir: &Path) -> Vec<String> {
 }
 
 fn env_names(project_dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(project_dir) else { return Vec::new() };
+    let Ok(entries) = fs::read_dir(project_dir) else {
+        return Vec::new();
+    };
     let mut out: Vec<String> = entries
         .flatten()
         .filter_map(|e| {
@@ -363,7 +385,11 @@ fn scan_tests(src: &[u8], out: &mut BTreeSet<String>) {
         .collect();
     docblocks.sort_by_key(|(end, _)| *end);
 
-    let mut ctx = TestCtx { names: std::mem::take(out), docblocks, prev_method_end: 0 };
+    let mut ctx = TestCtx {
+        names: std::mem::take(out),
+        docblocks,
+        prev_method_end: 0,
+    };
     walk_program(&TestScan, program, &mut ctx);
     *out = ctx.names;
 }
@@ -375,7 +401,7 @@ fn contains_test_tag(bytes: &[u8]) -> bool {
         let at = i + pos;
         let after = bytes.get(at + 5);
         // Tag boundary: end, whitespace, or `}` (annotation close).
-        if after.map_or(true, |c| c.is_ascii_whitespace() || *c == b'}' || *c == b'*') {
+        if after.is_none_or(|c| c.is_ascii_whitespace() || *c == b'}' || *c == b'*') {
             return true;
         }
         i = at + 5;
@@ -386,12 +412,9 @@ fn contains_test_tag(bytes: &[u8]) -> bool {
 struct TestScan;
 
 impl<'ast, 'arena> Walker<'ast, 'arena, TestCtx> for TestScan {
-    fn walk_in_class(
-        &self,
-        class: &'ast mago_syntax::cst::cst::Class<'arena>,
-        ctx: &mut TestCtx,
-    ) {
-        ctx.names.insert(String::from_utf8_lossy(class.name.value).into_owned());
+    fn walk_in_class(&self, class: &'ast mago_syntax::cst::cst::Class<'arena>, ctx: &mut TestCtx) {
+        ctx.names
+            .insert(String::from_utf8_lossy(class.name.value).into_owned());
     }
 
     fn walk_in_method(
@@ -416,7 +439,9 @@ impl<'ast, 'arena> Walker<'ast, 'arena, TestCtx> for TestScan {
         call: &'ast mago_syntax::cst::cst::FunctionCall<'arena>,
         ctx: &mut TestCtx,
     ) {
-        let Expression::Identifier(id) = call.function else { return };
+        let Expression::Identifier(id) = call.function else {
+            return;
+        };
         let fname = id.last_segment();
         if fname != b"it" && fname != b"test" {
             return;
@@ -433,7 +458,9 @@ impl<'ast, 'arena> Walker<'ast, 'arena, TestCtx> for TestScan {
 
 fn has_test_attribute(method: &mago_syntax::cst::cst::Method) -> bool {
     method.attribute_lists.iter().any(|list| {
-        list.attributes.iter().any(|attr| attr.name.last_segment().eq_ignore_ascii_case(b"test"))
+        list.attributes
+            .iter()
+            .any(|attr| attr.name.last_segment().eq_ignore_ascii_case(b"test"))
     })
 }
 
@@ -473,8 +500,7 @@ mod tests {
 
     #[test]
     fn reads_config_keys_and_class_stems() {
-        let dir =
-            std::env::temp_dir().join(format!("artisan-comp-wk-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("artisan-comp-wk-test-{}", std::process::id()));
         fs::create_dir_all(dir.join("config")).unwrap();
         fs::create_dir_all(dir.join("app/Models/Billing")).unwrap();
         fs::write(
@@ -492,19 +518,40 @@ return [
         )
         .unwrap();
         fs::write(dir.join("app/Models/User.php"), "<?php class User {}").unwrap();
-        fs::write(dir.join("app/Models/Billing/Invoice.php"), "<?php class Invoice {}").unwrap();
+        fs::write(
+            dir.join("app/Models/Billing/Invoice.php"),
+            "<?php class Invoice {}",
+        )
+        .unwrap();
 
         let cat = Catalog::build(&dir);
-        assert_eq!(cat.values("cache:clear", &Kind::Argument, "store"), vec!["array", "database", "redis"]);
-        assert_eq!(cat.values("make:controller", &Kind::Option, "model"), vec!["Invoice", "User"]);
+        assert_eq!(
+            cat.values("cache:clear", &Kind::Argument, "store"),
+            vec!["array", "database", "redis"]
+        );
+        assert_eq!(
+            cat.values("make:controller", &Kind::Option, "model"),
+            vec!["Invoice", "User"]
+        );
         let dotted = cat.values("config:show", &Kind::Argument, "config");
-        for k in ["cache", "cache.default", "cache.stores", "cache.stores.redis"] {
-            assert!(dotted.iter().any(|s| s == k), "missing dotted key {k}: {dotted:?}");
+        for k in [
+            "cache",
+            "cache.default",
+            "cache.stores",
+            "cache.stores.redis",
+        ] {
+            assert!(
+                dotted.iter().any(|s| s == k),
+                "missing dotted key {k}: {dotted:?}"
+            );
         }
 
         // Round-trips through the on-disk TSV.
         let restored = Catalog::from_tsv(&cat.to_tsv());
-        assert_eq!(restored.values("config:show", &Kind::Argument, "config"), dotted);
+        assert_eq!(
+            restored.values("config:show", &Kind::Argument, "config"),
+            dotted
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -535,7 +582,12 @@ class ThingTest extends TestCase
 "#,
             &mut out,
         );
-        for t in ["testClassic", "itUsesAttribute", "itUsesFqcnAttribute", "itUsesDocblock"] {
+        for t in [
+            "testClassic",
+            "itUsesAttribute",
+            "itUsesFqcnAttribute",
+            "itUsesDocblock",
+        ] {
             assert!(out.contains(t), "missing test {t}: {out:?}");
         }
         assert!(!out.contains("notATest"));
@@ -574,18 +626,27 @@ test('subtracts numbers', function () {});
         let cat = Catalog::build(&dir);
         let tests = cat.values("test", &Kind::Option, "filter");
         for t in ["adds numbers", "subtracts numbers"] {
-            assert!(tests.iter().any(|s| s == t), "missing test name {t}: {tests:?}");
+            assert!(
+                tests.iter().any(|s| s == t),
+                "missing test name {t}: {tests:?}"
+            );
         }
         assert_eq!(
             cat.values("migrate", &Kind::Option, "path"),
             vec!["database/migrations/2024_01_01_000000_create_users_table.php"]
         );
-        assert_eq!(cat.values("app:sync", &Kind::Option, "env"), vec!["local", "production"]);
+        assert_eq!(
+            cat.values("app:sync", &Kind::Option, "env"),
+            vec!["local", "production"]
+        );
         assert_eq!(
             cat.values("vendor:publish", &Kind::Option, "provider"),
             vec!["App\\Providers\\AppServiceProvider"]
         );
-        assert!(cat.values("route:list", &Kind::Option, "method").iter().any(|s| s == "GET"));
+        assert!(cat
+            .values("route:list", &Kind::Option, "method")
+            .iter()
+            .any(|s| s == "GET"));
 
         let _ = fs::remove_dir_all(&dir);
     }

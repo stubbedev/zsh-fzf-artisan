@@ -10,7 +10,10 @@ use std::process::Command;
 use crate::Project;
 
 pub fn enabled() -> bool {
-    matches!(env::var("ARTISAN_COMP_NATIVE").ok().as_deref(), Some("1" | "true" | "yes"))
+    matches!(
+        env::var("ARTISAN_COMP_NATIVE").ok().as_deref(),
+        Some("1" | "true" | "yes")
+    )
 }
 
 /// Query `_complete` for the cursor position. `words` is argv-style
@@ -27,7 +30,9 @@ pub fn complete(project: &Project, words: &[String], current: usize) -> Vec<Stri
         cmd.arg("-i").arg(w);
     }
 
-    let Ok(out) = cmd.output() else { return Vec::new() };
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
     if !out.status.success() {
         return Vec::new();
     }

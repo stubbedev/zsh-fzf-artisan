@@ -2,6 +2,29 @@
 
 Run Laravel Artisan commands from anywhere in your project, with tab completion. [fzf](https://github.com/junegunn/fzf) is optional — works without it too.
 
+## Demo
+
+Tab through commands, then through the values your code actually accepts — pulled from your command sources and Laravel conventions, not just the option list:
+
+```text
+$ artisan config:show <Tab>
+╭──────────────────────────────────────────────────────────────────╮
+│ Artisan Args >                    ┌────────────────────────────┐  │
+│ > app.name                        │ (config value to display)  │  │
+│   app.timezone                    │                            │  │
+│   database.default                └────────────────────────────┘  │
+│   database.connections.mysql                                      │
+│   cache.stores.redis                                              │
+│   5/128 ─────────────────────────────────────────────────────────│
+╰──────────────────────────────────────────────────────────────────╯
+
+$ artisan test --filter=<Tab>        # test classes, test* / #[Test] / @test methods, Pest descriptions
+$ artisan app:sync <Tab>             # 'github', 'gitlab' — the values handle() compares against
+$ artisan migrate --path=<Tab>       # migration files    $ artisan route:list --method=<Tab>  # GET, POST, …
+```
+
+Without fzf the same candidates come through native zsh completion, filtered by prefix.
+
 ## What it does
 
 - Type `artisan` instead of `php artisan`, from any subdirectory of your project

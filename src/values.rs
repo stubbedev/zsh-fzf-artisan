@@ -14,8 +14,8 @@ use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_syntax::cst::cst::{
     Access, Argument, Call, ClassLikeConstant, ClassLikeConstantSelector, ClassLikeMember,
-    ClassLikeMemberSelector, EnumCaseItem, Expression, Literal, MatchArm, NamespaceBody,
-    Statement, SwitchCase, Variable,
+    ClassLikeMemberSelector, EnumCaseItem, Expression, Literal, MatchArm, NamespaceBody, Statement,
+    SwitchCase, Variable,
 };
 use mago_syntax::walker::{walk_program, Walker};
 
@@ -53,7 +53,9 @@ fn candidate_files(project_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_php_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -67,7 +69,9 @@ fn collect_php_files(dir: &Path, out: &mut Vec<PathBuf>) {
 /// Recursively find directories named `Console` under `dir` and collect every
 /// `.php` beneath each — so only command subtrees are read, not the whole app.
 pub fn collect_console_php(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -144,8 +148,12 @@ fn parse_uses(src: &[u8]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for line in text.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("use ") else { continue };
-        let Some(rest) = rest.strip_suffix(';') else { continue };
+        let Some(rest) = line.strip_prefix("use ") else {
+            continue;
+        };
+        let Some(rest) = rest.strip_suffix(';') else {
+            continue;
+        };
         if rest.contains('{') || rest.starts_with("function ") || rest.starts_with("const ") {
             continue;
         }
@@ -194,15 +202,18 @@ impl Ctx {
         if let Some(memo) = self.enums.get(written) {
             return memo.clone();
         }
-        let fqn = self
-            .uses
-            .get(written)
-            .cloned()
-            .or_else(|| written.contains('\\').then(|| written.trim_start_matches('\\').to_string()));
+        let fqn = self.uses.get(written).cloned().or_else(|| {
+            written
+                .contains('\\')
+                .then(|| written.trim_start_matches('\\').to_string())
+        });
         let result = fqn.and_then(|fqn| {
             let rel = fqn.strip_prefix("App\\")?.replace('\\', "/");
             let short = fqn.rsplit('\\').next().unwrap_or(&fqn).to_string();
-            load_enum_cases(&self.project_dir.join("app").join(format!("{rel}.php")), &short)
+            load_enum_cases(
+                &self.project_dir.join("app").join(format!("{rel}.php")),
+                &short,
+            )
         });
         self.enums.insert(written.to_string(), result.clone());
         result
@@ -299,25 +310,39 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
             // Negation (!in_array) needs no handling: the walker visits the
             // inner call either way.
             Expression::Call(Call::Function(fc)) => {
-                let Expression::Identifier(id) = fc.function else { return };
+                let Expression::Identifier(id) = fc.function else {
+                    return;
+                };
                 if !id.last_segment().eq_ignore_ascii_case(b"in_array") {
                     return;
                 }
                 let mut args = fc.argument_list.arguments.iter();
-                let (Some(first), Some(second)) = (args.next(), args.next()) else { return };
-                let Some(r) = expr_ref(first.value(), ctx) else { return };
+                let (Some(first), Some(second)) = (args.next(), args.next()) else {
+                    return;
+                };
+                let Some(r) = expr_ref(first.value(), ctx) else {
+                    return;
+                };
                 let vals = collect_strings(second.value(), ctx);
                 ctx.add_all(&r, vals);
             }
             // Source::from($this->argument('x')) / Source::tryFrom(...) → all case values
             Expression::Call(Call::StaticMethod(smc)) => {
-                let ClassLikeMemberSelector::Identifier(m) = &smc.method else { return };
+                let ClassLikeMemberSelector::Identifier(m) = &smc.method else {
+                    return;
+                };
                 if !matches!(m.value, b"from" | b"tryFrom") {
                     return;
                 }
-                let Expression::Identifier(cid) = smc.class else { return };
-                let Some(first) = smc.argument_list.arguments.iter().next() else { return };
-                let Some(r) = expr_ref(first.value(), ctx) else { return };
+                let Expression::Identifier(cid) = smc.class else {
+                    return;
+                };
+                let Some(first) = smc.argument_list.arguments.iter().next() else {
+                    return;
+                };
+                let Some(r) = expr_ref(first.value(), ctx) else {
+                    return;
+                };
                 let written = utf8(cid.value());
                 if let Some(cases) = ctx.enum_cases(&written) {
                     ctx.add_all(&r, cases.into_values().collect());
@@ -325,7 +350,9 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
             }
             // match ($this->argument('x')) { 'a', self::B, Enum::C->value => ... }
             Expression::Match(m) => {
-                let Some(r) = expr_ref(m.expression, ctx) else { return };
+                let Some(r) = expr_ref(m.expression, ctx) else {
+                    return;
+                };
                 for arm in m.arms.iter() {
                     if let MatchArm::Expression(arm) = arm {
                         for cond in arm.conditions.iter() {
@@ -344,8 +371,12 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
         if !ctx.collect {
             return;
         }
-        let Statement::Switch(s) = statement else { return };
-        let Some(r) = expr_ref(s.expression, ctx) else { return };
+        let Statement::Switch(s) = statement else {
+            return;
+        };
+        let Some(r) = expr_ref(s.expression, ctx) else {
+            return;
+        };
         for case in s.body.cases() {
             if let SwitchCase::Expression(c) = case {
                 let vals = lit_strings(c.expression, ctx);
@@ -363,11 +394,15 @@ fn expr_ref(expr: &Expression, ctx: &Ctx) -> Option<RefKey> {
         Expression::Parenthesized(p) => expr_ref(p.expression, ctx),
         Expression::Binary(b) if b.operator.is_null_coalesce() => expr_ref(b.lhs, ctx),
         Expression::Call(Call::Method(mc)) => {
-            let Expression::Variable(Variable::Direct(dv)) = mc.object else { return None };
+            let Expression::Variable(Variable::Direct(dv)) = mc.object else {
+                return None;
+            };
             if dv.name != b"$this" {
                 return None;
             }
-            let ClassLikeMemberSelector::Identifier(id) = &mc.method else { return None };
+            let ClassLikeMemberSelector::Identifier(id) = &mc.method else {
+                return None;
+            };
             let kind = match id.value {
                 b"argument" => Kind::Argument,
                 b"option" => Kind::Option,
@@ -394,7 +429,11 @@ pub(crate) fn lit_str(expr: &Expression) -> Option<String> {
                 Some(v) => v,
                 None => {
                     let r = s.raw;
-                    if r.len() >= 2 { &r[1..r.len() - 1] } else { r }
+                    if r.len() >= 2 {
+                        &r[1..r.len() - 1]
+                    } else {
+                        r
+                    }
                 }
             };
             Some(String::from_utf8_lossy(bytes).into_owned())
@@ -417,7 +456,10 @@ fn lit_strings(expr: &Expression, ctx: &mut Ctx) -> Vec<String> {
             let ClassLikeConstantSelector::Identifier(sel) = &cca.constant else {
                 return Vec::new();
             };
-            ctx.consts.get(&utf8(sel.value)).cloned().unwrap_or_default()
+            ctx.consts
+                .get(&utf8(sel.value))
+                .cloned()
+                .unwrap_or_default()
         }
         // Enum::Case->value
         Expression::Access(Access::Property(pa)) => {
@@ -430,7 +472,9 @@ fn lit_strings(expr: &Expression, ctx: &mut Ctx) -> Vec<String> {
             let Expression::Access(Access::ClassConstant(cca)) = pa.object else {
                 return Vec::new();
             };
-            let Expression::Identifier(cid) = cca.class else { return Vec::new() };
+            let Expression::Identifier(cid) = cca.class else {
+                return Vec::new();
+            };
             let ClassLikeConstantSelector::Identifier(case) = &cca.constant else {
                 return Vec::new();
             };
@@ -472,25 +516,33 @@ fn enum_all_values(expr: &Expression, ctx: &mut Ctx) -> Vec<String> {
         Expression::Parenthesized(p) => enum_all_values(p.expression, ctx),
         // Enum::cases()
         Expression::Call(Call::StaticMethod(smc)) => {
-            let ClassLikeMemberSelector::Identifier(m) = &smc.method else { return Vec::new() };
+            let ClassLikeMemberSelector::Identifier(m) = &smc.method else {
+                return Vec::new();
+            };
             if m.value != b"cases" {
                 return Vec::new();
             }
-            let Expression::Identifier(cid) = smc.class else { return Vec::new() };
+            let Expression::Identifier(cid) = smc.class else {
+                return Vec::new();
+            };
             ctx.enum_cases(&utf8(cid.value()))
                 .map(|cases| cases.into_values().collect())
                 .unwrap_or_default()
         }
         // array_column(Enum::cases(), 'value') / array_map(fn, Enum::cases())
         Expression::Call(Call::Function(fc)) => {
-            let Expression::Identifier(id) = fc.function else { return Vec::new() };
+            let Expression::Identifier(id) = fc.function else {
+                return Vec::new();
+            };
             let args: Vec<_> = fc.argument_list.arguments.iter().collect();
             let inner = match id.last_segment() {
                 n if n.eq_ignore_ascii_case(b"array_column") => args.first(),
                 n if n.eq_ignore_ascii_case(b"array_map") => args.get(1),
                 _ => return Vec::new(),
             };
-            inner.map(|a| enum_all_values(a.value(), ctx)).unwrap_or_default()
+            inner
+                .map(|a| enum_all_values(a.value(), ctx))
+                .unwrap_or_default()
         }
         _ => Vec::new(),
     }
@@ -507,7 +559,10 @@ fn const_strings(expr: &Expression) -> Vec<String> {
         Expression::LegacyArray(a) => a.elements.as_slice(),
         _ => return Vec::new(),
     };
-    elements.iter().filter_map(|e| lit_str(e.get_value()?)).collect()
+    elements
+        .iter()
+        .filter_map(|e| lit_str(e.get_value()?))
+        .collect()
 }
 
 fn utf8(bytes: &[u8]) -> String {
@@ -581,13 +636,32 @@ class SyncCommand extends Command
         let out = extract_fixture(FIXTURE);
 
         let source = &out[&(Kind::Argument, "source".to_string())];
-        for v in ["github", "gitlab", "bitbucket", "svn", "hg", "zip", "rar", "a", "b", "c"] {
-            assert!(source.iter().any(|s| s == v), "missing argument value {v}: {source:?}");
+        for v in [
+            "github",
+            "gitlab",
+            "bitbucket",
+            "svn",
+            "hg",
+            "zip",
+            "rar",
+            "a",
+            "b",
+            "c",
+        ] {
+            assert!(
+                source.iter().any(|s| s == v),
+                "missing argument value {v}: {source:?}"
+            );
         }
 
         let mode = &out[&(Kind::Option, "mode".to_string())];
-        for v in ["fast", "slow", "medium", "turbo", "hidden", "debug", "trace"] {
-            assert!(mode.iter().any(|s| s == v), "missing option value {v}: {mode:?}");
+        for v in [
+            "fast", "slow", "medium", "turbo", "hidden", "debug", "trace",
+        ] {
+            assert!(
+                mode.iter().any(|s| s == v),
+                "missing option value {v}: {mode:?}"
+            );
         }
         assert!(!mode.iter().any(|s| s == "ignored-default"));
     }
@@ -628,7 +702,10 @@ class ChargeCommand extends Command
 
         let tier = &out[&(Kind::Argument, "tier".to_string())];
         for v in ["free", "paid"] {
-            assert!(tier.iter().any(|s| s == v), "missing {v} from nonstandard dir: {tier:?}");
+            assert!(
+                tier.iter().any(|s| s == v),
+                "missing {v} from nonstandard dir: {tier:?}"
+            );
         }
     }
 
@@ -682,11 +759,17 @@ class SyncCommand extends Command
 
         let source = &out[&(Kind::Argument, "source".to_string())];
         for v in ["github", "gitlab", "svn"] {
-            assert!(source.iter().any(|s| s == v), "missing enum value {v}: {source:?}");
+            assert!(
+                source.iter().any(|s| s == v),
+                "missing enum value {v}: {source:?}"
+            );
         }
         let kind = &out[&(Kind::Option, "kind".to_string())];
         for v in ["github", "gitlab", "svn"] {
-            assert!(kind.iter().any(|s| s == v), "missing tryFrom value {v}: {kind:?}");
+            assert!(
+                kind.iter().any(|s| s == v),
+                "missing tryFrom value {v}: {kind:?}"
+            );
         }
     }
 }

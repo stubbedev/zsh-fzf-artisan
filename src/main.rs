@@ -25,8 +25,16 @@ use serde_json::Value;
 use values::Kind;
 
 /// Global options present on every artisan command — filtered from args completions.
-const GLOBAL_OPTS: &[&str] =
-    &["help", "quiet", "verbose", "version", "ansi", "no-ansi", "no-interaction", "env"];
+const GLOBAL_OPTS: &[&str] = &[
+    "help",
+    "quiet",
+    "verbose",
+    "version",
+    "ansi",
+    "no-ansi",
+    "no-interaction",
+    "env",
+];
 
 const SKIP_ARGS: &[&str] = &["command"];
 
@@ -66,7 +74,9 @@ fn main() -> ExitCode {
     }
     let cwd = cwd.map(PathBuf::from).or_else(|| env::current_dir().ok());
 
-    let Some(cwd) = cwd else { return ExitCode::FAILURE };
+    let Some(cwd) = cwd else {
+        return ExitCode::FAILURE;
+    };
     match run(&cwd, current, &words) {
         Some(output) => {
             let mut stdout = std::io::stdout().lock();
@@ -96,7 +106,9 @@ fn run(cwd: &Path, current: usize, words: &[String]) -> Option<String> {
 fn prune_cache(cache_dir: &Path) {
     const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 60 * 60);
     let now = SystemTime::now();
-    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    let Ok(entries) = fs::read_dir(cache_dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_file() {
@@ -117,7 +129,10 @@ fn prune_cache(cache_dir: &Path) {
 /// Write via a temp file + rename so a concurrent reader (another shell tabbing
 /// the same project) never sees a half-written cache.
 fn write_atomic(path: &Path, data: &[u8]) {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
     if fs::write(&tmp, data).is_ok() {
         let _ = fs::rename(&tmp, path);
@@ -156,7 +171,9 @@ fn load_catalog(project: &Project, cache_dir: &Path, project_hash: &str) -> well
 
 fn command_lines(list: &Value) -> String {
     let mut out = String::new();
-    let Some(commands) = list.get("commands").and_then(Value::as_array) else { return out };
+    let Some(commands) = list.get("commands").and_then(Value::as_array) else {
+        return out;
+    };
     for cmd in commands {
         let name = cmd.get("name").and_then(Value::as_str).unwrap_or("");
         if name.is_empty() || name.starts_with('_') {
@@ -177,8 +194,10 @@ fn load_values(
     project_hash: &str,
     subcmd: &str,
 ) -> values::Values {
-    let cache_file =
-        cache_dir.join(format!("{project_hash}_{}.vals", fnv_hex(subcmd.as_bytes())));
+    let cache_file = cache_dir.join(format!(
+        "{project_hash}_{}.vals",
+        fnv_hex(subcmd.as_bytes())
+    ));
     if !is_stale(&cache_file, newest_command_source(project)) {
         if let Ok(text) = fs::read_to_string(&cache_file) {
             let mut vals = values::Values::new();
@@ -187,8 +206,14 @@ fn load_values(
                 if let (Some(kind), Some(name), Some(value)) =
                     (parts.next(), parts.next(), parts.next())
                 {
-                    let kind = if kind == "option" { Kind::Option } else { Kind::Argument };
-                    vals.entry((kind, name.to_string())).or_default().push(value.to_string());
+                    let kind = if kind == "option" {
+                        Kind::Option
+                    } else {
+                        Kind::Argument
+                    };
+                    vals.entry((kind, name.to_string()))
+                        .or_default()
+                        .push(value.to_string());
                 }
             }
             return vals;
@@ -227,7 +252,10 @@ fn complete_args(
     let command = list
         .get("commands")
         .and_then(Value::as_array)
-        .and_then(|cmds| cmds.iter().find(|c| c.get("name").and_then(Value::as_str) == Some(&subcmd)));
+        .and_then(|cmds| {
+            cmds.iter()
+                .find(|c| c.get("name").and_then(Value::as_str) == Some(&subcmd))
+        });
     let Some(def) = command.and_then(|c| c.get("definition")) else {
         // Namespace prefix or unknown command — offer prefix-filtered command list.
         let prefix = format!("{subcmd}:");
@@ -247,7 +275,10 @@ fn complete_args(
     // Values from the command source, then the cached well-known catalog
     // (models, seeders, config keys, test names, migrations, …).
     let combined = |kind: Kind, name: &str| -> Vec<String> {
-        let mut v = vals.get(&(kind.clone(), name.to_string())).cloned().unwrap_or_default();
+        let mut v = vals
+            .get(&(kind.clone(), name.to_string()))
+            .cloned()
+            .unwrap_or_default();
         for x in catalog.values(&subcmd, &kind, name) {
             if !v.contains(&x) {
                 v.push(x);
@@ -261,7 +292,10 @@ fn complete_args(
     if let Some(opts) = def.get("options").and_then(Value::as_object) {
         for (key, opt) in opts {
             if !opt.is_object()
-                || !opt.get("accept_value").and_then(Value::as_bool).unwrap_or(false)
+                || !opt
+                    .get("accept_value")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
             {
                 continue;
             }
@@ -278,8 +312,12 @@ fn complete_args(
     }
 
     // Words already typed between the subcommand and the cursor.
-    let prior_words: Vec<&str> =
-        words.iter().take(current.saturating_sub(1)).skip(2).map(String::as_str).collect();
+    let prior_words: Vec<&str> = words
+        .iter()
+        .take(current.saturating_sub(1))
+        .skip(2)
+        .map(String::as_str)
+        .collect();
 
     let (filled, in_positional_only) =
         scan_prior_words(&prior_words, |w| value_opts.contains_key(w));
@@ -318,7 +356,7 @@ fn complete_args(
         // (`artisan cmd --mode <Tab>`), so offer that option's values plainly.
         let previous_word = current.checked_sub(2).and_then(|i| words.get(i));
         if let Some(prev) = previous_word {
-            if current_word.map_or(true, |w| !w.starts_with('-')) {
+            if current_word.is_none_or(|w| !w.starts_with('-')) {
                 if let Some(&key) = value_opts.get(prev.as_str()) {
                     let opt_vals = option_values(key);
                     if !opt_vals.is_empty() {
@@ -341,7 +379,10 @@ fn complete_args(
             if !arg.is_object() || SKIP_ARGS.contains(&key.as_str()) {
                 continue;
             }
-            let is_array = arg.get("is_array").and_then(Value::as_bool).unwrap_or(false);
+            let is_array = arg
+                .get("is_array")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             // Skip positionals already supplied on the line (array arguments
             // absorb the rest, so they always stay offered).
             let already_filled = position < filled && !is_array;
@@ -351,7 +392,11 @@ fn complete_args(
             }
             let suffix = if is_array {
                 "..."
-            } else if !arg.get("is_required").and_then(Value::as_bool).unwrap_or(false) {
+            } else if !arg
+                .get("is_required")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
                 "?"
             } else {
                 ""
@@ -366,25 +411,38 @@ fn complete_args(
     }
 
     // After a bare `--`, options can no longer be passed — offer none.
-    let opts = if in_positional_only { None } else { def.get("options").and_then(Value::as_object) };
+    let opts = if in_positional_only {
+        None
+    } else {
+        def.get("options").and_then(Value::as_object)
+    };
     if let Some(opts) = opts {
         for (key, opt) in opts {
             if !opt.is_object() || GLOBAL_OPTS.contains(&key.as_str()) {
                 continue;
             }
-            let accepts = opt.get("accept_value").and_then(Value::as_bool).unwrap_or(false);
+            let accepts = opt
+                .get("accept_value")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             let eq = if accepts { "=" } else { "" };
             let name = opt.get("name").and_then(Value::as_str).unwrap_or("");
             let shortcut = opt.get("shortcut").and_then(Value::as_str).unwrap_or("");
             // Drop options already present on the line, unless repeatable.
-            let multiple = opt.get("is_multiple").and_then(Value::as_bool).unwrap_or(false);
+            let multiple = opt
+                .get("is_multiple")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             if !multiple && option_used(&prior_words, name, shortcut) {
                 continue;
             }
             let desc = clean(opt.get("description").and_then(Value::as_str).unwrap_or(""));
             let hint = hints(opt);
-            let shortcut_prefix =
-                if shortcut.is_empty() { String::new() } else { format!("({shortcut}) ") };
+            let shortcut_prefix = if shortcut.is_empty() {
+                String::new()
+            } else {
+                format!("({shortcut}) ")
+            };
             out.push_str(&format!("{name}{eq}\t{shortcut_prefix}{desc}{hint}\n"));
             if !shortcut.is_empty() {
                 out.push_str(&format!("{shortcut}{eq}\t{desc}{hint}\n"));
@@ -397,12 +455,21 @@ fn complete_args(
 
 fn hints(v: &Value) -> String {
     let mut h = String::new();
-    let accepts = v.get("accept_value").and_then(Value::as_bool).unwrap_or(false);
-    let required = v.get("is_value_required").and_then(Value::as_bool).unwrap_or(true);
+    let accepts = v
+        .get("accept_value")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let required = v
+        .get("is_value_required")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
     if accepts && !required {
         h.push_str(" [optional value]");
     }
-    if v.get("is_multiple").and_then(Value::as_bool).unwrap_or(false) {
+    if v.get("is_multiple")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
         h.push_str(" [repeatable]");
     }
     if let Some(d) = v.get("default") {
@@ -484,8 +551,13 @@ fn ensure_cache(
 
 /// Stale when the cache is missing/empty or any watched source is newer.
 fn is_stale(cache_file: &Path, newest: Option<SystemTime>) -> bool {
-    let Some(cache_time) = mtime(cache_file) else { return true };
-    if fs::metadata(cache_file).map(|m| m.len() == 0).unwrap_or(true) {
+    let Some(cache_time) = mtime(cache_file) else {
+        return true;
+    };
+    if fs::metadata(cache_file)
+        .map(|m| m.len() == 0)
+        .unwrap_or(true)
+    {
         return true;
     }
     newest.is_some_and(|src| src > cache_time)
@@ -533,7 +605,10 @@ fn newest_catalog_source(project: &Project) -> Option<SystemTime> {
         if let Ok(entries) = fs::read_dir(&project.dir) {
             for entry in entries.flatten() {
                 if entry.file_name().to_string_lossy().starts_with(".env.") {
-                    bump(&mut newest, entry.metadata().and_then(|m| m.modified()).ok());
+                    bump(
+                        &mut newest,
+                        entry.metadata().and_then(|m| m.modified()).ok(),
+                    );
                 }
             }
         }
@@ -543,7 +618,7 @@ fn newest_catalog_source(project: &Project) -> Option<SystemTime> {
 
 fn bump(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
     if let Some(t) = candidate {
-        if newest.map_or(true, |n| t > n) {
+        if newest.is_none_or(|n| t > n) {
             *newest = Some(t);
         }
     }
@@ -552,7 +627,9 @@ fn bump(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
 /// Newest `.php` mtime under any `Console` directory in the tree.
 fn newest_console_php(dir: &Path) -> Option<SystemTime> {
     let mut newest = None;
-    let Ok(entries) = fs::read_dir(dir) else { return None };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -570,7 +647,9 @@ fn newest_console_php(dir: &Path) -> Option<SystemTime> {
 
 fn newest_php_in(dir: &Path) -> Option<SystemTime> {
     let mut newest = None;
-    let Ok(entries) = fs::read_dir(dir) else { return None };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return None;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -673,8 +752,7 @@ mod tests {
     #[test]
     fn double_dash_switches_to_positional_only() {
         // After `--`, dash-words count as positionals and option parsing stops.
-        let (filled, positional_only) =
-            scan_prior_words(&["--", "-x", "value"], takes_value);
+        let (filled, positional_only) = scan_prior_words(&["--", "-x", "value"], takes_value);
         assert_eq!(filled, 2);
         assert!(positional_only);
     }
