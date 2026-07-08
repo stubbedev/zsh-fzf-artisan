@@ -1,0 +1,22 @@
+[package]
+name = "artisan-comp"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Completion engine for zsh-fzf-artisan"
+
+[[bin]]
+name = "artisan-comp"
+path = "src/main.rs"
+
+[dependencies]
+mago-syntax = "1.43"
+mago-allocator = "1.43"
+mago-database = "1.43"
+mago-span = "1.43"
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -2,50 +2,187 @@
 # Laravel artisan plugin for zsh with fzf integration
 #--------------------------------------------------------------------------
 #
-# This plugin adds an `artisan` shell command that will find and execute
-# Laravel's artisan command from anywhere within the project. It also
-# adds shell completions that work anywhere artisan can be located.
+# Adds an `artisan` shell command that finds and executes Laravel's artisan
+# from anywhere within the project, plus tab completions.
+#
+# Completions are served by the artisan-comp binary. This script's job is to
+# ensure the binary exists — it downloads the prebuilt release matching this
+# checkout's version from GitHub in the background — and to hand its output
+# to zsh/fzf. No local toolchain is needed; `git pull` upgrades everything.
 # fzf is optional — falls back to native zsh completion when not available.
 
 # Cache setup
 ARTISAN_CACHE_DIR="${HOME}/.cache/artisan"
 mkdir -p "$ARTISAN_CACHE_DIR"
 
-# Load zsh/datetime for $EPOCHSECONDS and strftime — used to throttle the
-# Commands file check and for cross-platform timestamp handling.
-# Silent load: no error if the module is unavailable.
+# Load zsh/datetime for $EPOCHSECONDS and strftime — used for cross-platform
+# timestamp handling in the make: editor hook. Silent load.
 zmodload -s zsh/datetime
 
-# Cache tool availability at load time — avoids a fork on every tab press.
+# Cache fzf availability at load time — avoids a fork on every tab press.
 if command -v fzf >/dev/null 2>&1; then
   _artisan_fzf_available() { return 0 }
 else
   _artisan_fzf_available() { return 1 }
 fi
 
-if command -v jq >/dev/null 2>&1; then
-  _artisan_jq_available() { return 0 }
-else
-  _artisan_jq_available() { return 1 }
-fi
-
 # Resolve PHP binary at load time — completion subshells may have a stripped PATH
 # (NixOS, Herd Lite, etc.) that doesn't include the same php as the interactive shell.
 _ARTISAN_PHP_BIN="${_ARTISAN_PHP_BIN:-$(command -v php 2>/dev/null)}"
+export _ARTISAN_PHP_BIN
 
-# Global options present on every artisan command — filtered from args completions.
-# Declared at load time so it is not reallocated on every tab press. Guarded
-# with `${+var}` so re-sourcing ~/.zshrc (e.g. after a config tweak) doesn't
-# trip `read-only variable: _ARTISAN_GLOBAL_OPTS`.
-(( ${+_ARTISAN_GLOBAL_OPTS} )) || \
-  typeset -gr _ARTISAN_GLOBAL_OPTS='["help","quiet","verbose","version","ansi","no-ansi","no-interaction","env"]'
-
-# Per-$PWD artisan path cache — avoids directory walk on repeated tab presses.
+# Per-$PWD artisan path cache — avoids directory walk on repeated calls.
 typeset -gA _ARTISAN_FIND_CACHE
-# Per-string hash cache — pure-zsh hash only runs once per unique string per session.
-typeset -gA _ARTISAN_HASH_CACHE
-# Per-project command list cache — avoids disk reads on repeated command completion.
-typeset -gA _ARTISAN_LIST_CACHE
+
+typeset -g _ARTISAN_PLUGIN_DIR="${${(%):-%N}:A:h}"
+typeset -g _ARTISAN_COMP_BIN=""
+typeset -g _ARTISAN_REPO="stubbedev/zsh-fzf-artisan"
+
+#--------------------------------------------------------------------------
+# artisan-comp binary management
+#--------------------------------------------------------------------------
+
+# Sets REPLY to the binary version this checkout wants (from Cargo.toml).
+function _artisan_wanted_version() {
+  REPLY=""
+  local line
+  while IFS= read -r line; do
+    if [[ "$line" == version*=* ]]; then
+      REPLY="${${line#*\"}%%\"*}"
+      return 0
+    fi
+  done <"$_ARTISAN_PLUGIN_DIR/Cargo.toml" 2>/dev/null
+  return 1
+}
+
+function _artisan_locate_binary() {
+  local c
+  # target/release is a local dev build escape hatch (unsupported platforms).
+  for c in "$_ARTISAN_PLUGIN_DIR/bin/artisan-comp" "$_ARTISAN_PLUGIN_DIR/target/release/artisan-comp"; do
+    if [[ -x "$c" ]]; then
+      _ARTISAN_COMP_BIN="$c"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# Download the release binary for this platform in the background. A stamp
+# file records the attempted version so a failing download (offline, release
+# missing) is retried only after `git pull` changes the wanted version, or
+# after the stamp is deleted.
+function _artisan_ensure_binary() {
+  _artisan_wanted_version || return 1
+  local wanted=$REPLY
+
+  if _artisan_locate_binary; then
+    # Dev builds in target/release are left alone; only bin/ is managed.
+    [[ "$_ARTISAN_COMP_BIN" != "$_ARTISAN_PLUGIN_DIR/bin/"* ]] && return 0
+    # Fork-free version check: the downloader stamps bin/.version. Fall back
+    # to one exec (and backfill the stamp) if it's missing.
+    local vfile="$_ARTISAN_PLUGIN_DIR/bin/.version" have=""
+    if [[ -f "$vfile" ]]; then
+      have="$(<$vfile)"
+    else
+      have=$("$_ARTISAN_COMP_BIN" version 2>/dev/null)
+      [[ -n "$have" ]] && print -r -- "$have" >"$vfile" 2>/dev/null
+    fi
+    [[ "$have" == "$wanted" ]] && return 0
+  fi
+
+  local stamp="$ARTISAN_CACHE_DIR/download.stamp"
+  [[ -f "$stamp" && "$(<$stamp)" == "$wanted" ]] && return 1
+
+  local os arch
+  case "$OSTYPE" in
+    darwin*) os="apple-darwin" ;;
+    linux*)  os="unknown-linux-musl" ;;
+    *) return 1 ;;
+  esac
+  case "$(uname -m)" in
+    arm64|aarch64) arch="aarch64" ;;
+    x86_64|amd64)  arch="x86_64" ;;
+    *) return 1 ;;
+  esac
+
+  print -r -- "$wanted" >"$stamp"
+  >&2 echo "zsh-fzf-artisan: downloading artisan-comp v${wanted} (${arch}-${os}) in background"
+  (
+    local base="https://github.com/${_ARTISAN_REPO}/releases/download/v${wanted}/artisan-comp-${arch}-${os}"
+    local dest="$_ARTISAN_PLUGIN_DIR/bin/artisan-comp"
+    local tmp="$_ARTISAN_PLUGIN_DIR/bin/.artisan-comp.$$.$RANDOM"
+    local sum="$tmp.sha256"
+    mkdir -p "$_ARTISAN_PLUGIN_DIR/bin"
+
+    local fetch
+    if command -v curl >/dev/null 2>&1; then
+      fetch() { curl -fsSL -o "$1" "$2" }
+    elif command -v wget >/dev/null 2>&1; then
+      fetch() { wget -qO "$1" "$2" }
+    else
+      exit 1
+    fi
+
+    { fetch "$tmp" "$base" && fetch "$sum" "${base}.sha256" } || { rm -f "$tmp" "$sum"; exit 1 }
+
+    # Verify the SHA-256 published alongside the binary before trusting it.
+    # Refuse (rather than install unverified) if no checksum tool is available.
+    local expected actual
+    expected="${$(<"$sum")%% *}"
+    if command -v sha256sum >/dev/null 2>&1; then
+      actual="$(sha256sum "$tmp")"; actual="${actual%% *}"
+    elif command -v shasum >/dev/null 2>&1; then
+      actual="$(shasum -a 256 "$tmp")"; actual="${actual%% *}"
+    fi
+    rm -f "$sum"
+    if [[ -z "$expected" || -z "$actual" || "$actual" != "$expected" ]]; then
+      rm -f "$tmp"
+      exit 1
+    fi
+
+    chmod +x "$tmp"
+    # Only install a binary that also runs and reports the expected version.
+    if [[ "$("$tmp" version 2>/dev/null)" == "$wanted" ]]; then
+      mv -f "$tmp" "$dest"
+      print -r -- "$wanted" >"$_ARTISAN_PLUGIN_DIR/bin/.version"
+      rm -f "$stamp"
+    else
+      rm -f "$tmp"
+    fi
+  ) &>/dev/null &!
+  return 1
+}
+
+_artisan_ensure_binary
+
+#--------------------------------------------------------------------------
+# artisan command wrapper
+#--------------------------------------------------------------------------
+
+# Sets REPLY to the absolute artisan path. Returns 0 on success, 1 if not found.
+# Cached per $PWD — directory walk only runs once per location per session.
+# Re-validates the cached path on each hit to handle moves/deletes.
+function _artisan_find() {
+  if [[ "${+_ARTISAN_FIND_CACHE[$PWD]}" == "1" ]]; then
+    REPLY="${_ARTISAN_FIND_CACHE[$PWD]}"
+    if [[ -z "$REPLY" || -f "$REPLY" ]]; then
+      [[ -n "$REPLY" ]] && return 0 || return 1
+    fi
+  fi
+  local dir=.
+  until [[ $dir -ef / ]]; do
+    if [[ -f "$dir/artisan" ]]; then
+      REPLY="${dir}/artisan"
+      REPLY="${REPLY:A}"  # absolutize via :A — resolves . and .. without forking
+      _ARTISAN_FIND_CACHE[$PWD]="$REPLY"
+      return 0
+    fi
+    dir+=/..
+  done
+  _ARTISAN_FIND_CACHE[$PWD]=""
+  REPLY=""
+  return 1
+}
 
 function artisan() {
   _artisan_find || {
@@ -86,33 +223,9 @@ function artisan() {
   return $artisan_exit_status
 }
 
-compdef _artisan artisan
-
-# ./artisan — zsh strips path prefix for basename lookup, but register explicitly as fallback.
-compdef _artisan './artisan'
-
-# `php artisan ...` — find artisan in the word list and delegate.
-function _artisan_php_wrapper() {
-  local artisan_idx=0 i
-  for (( i = 2; i <= ${#words}; i++ )); do
-    if [[ "${words[$i]}" == "artisan" || "${words[$i]}" == *"/artisan" ]]; then
-      artisan_idx=$i
-      break
-    fi
-  done
-
-  if (( artisan_idx > 0 )); then
-    if (( CURRENT > artisan_idx )); then
-      words=("artisan" "${words[@]:$artisan_idx}")
-      (( CURRENT -= artisan_idx - 1 ))
-      _artisan
-    fi
-    return
-  fi
-
-  _default
-}
-compdef _artisan_php_wrapper php
+#--------------------------------------------------------------------------
+# completions
+#--------------------------------------------------------------------------
 
 # Present tab-separated "name\tdescription" items as completions.
 # With fzf: opens fuzzy picker. Without fzf: falls back to zsh _describe.
@@ -157,7 +270,7 @@ function _artisan_complete() {
         eq_names+=("$name")
         eq_descs+=("${desc:-$name}")
       else
-        reg_entries+=("${name/:/\\:}:${desc:-$name}")
+        reg_entries+=("${name//:/\\:}:${desc:-$name}")
       fi
     done <<< "$items"
     # Options ending with = need -S '' to suppress the auto-inserted trailing space.
@@ -168,195 +281,70 @@ function _artisan_complete() {
   fi
 }
 
-# Sets REPLY to the absolute artisan path. Returns 0 on success, 1 if not found.
-# Cached per $PWD — directory walk only runs once per location per session.
-# Re-validates the cached path on each hit to handle moves/deletes.
-function _artisan_find() {
-  if [[ "${+_ARTISAN_FIND_CACHE[$PWD]}" == "1" ]]; then
-    REPLY="${_ARTISAN_FIND_CACHE[$PWD]}"
-    if [[ -z "$REPLY" || -f "$REPLY" ]]; then
-      [[ -n "$REPLY" ]] && return 0 || return 1
-    fi
-  fi
-  local dir=.
-  until [[ $dir -ef / ]]; do
-    if [[ -f "$dir/artisan" ]]; then
-      REPLY="${dir}/artisan"
-      REPLY="${REPLY:A}"  # absolutize via :A — resolves . and .. without forking
-      _ARTISAN_FIND_CACHE[$PWD]="$REPLY"
-      return 0
-    fi
-    dir+=/..
-  done
-  _ARTISAN_FIND_CACHE[$PWD]=""
-  REPLY=""
-  return 1
-}
-
-# Sets REPLY to an 8-character hex hash of $1 for use as a cache filename component.
-# Pure-zsh DJB2 variant — completely fork-free. Cached per unique string per session.
-function _artisan_hash() {
-  if [[ "${+_ARTISAN_HASH_CACHE[$1]}" == "1" ]]; then
-    REPLY="${_ARTISAN_HASH_CACHE[$1]}"
-    return
-  fi
-  local s="$1" c i
-  local -i h=5381 code
-  for (( i = 1; i <= ${#s}; i++ )); do
-    c="${s[i]}"
-    # printf '%d' "'$c" gives the ASCII value of $c via POSIX 'c format — printf is a zsh builtin, no fork.
-    printf -v code '%d' "'$c"
-    (( h = ((h << 5) + h + code) & 0x7fffffff ))
-  done
-  REPLY=$(printf '%08x' $h)
-  _ARTISAN_HASH_CACHE[$1]="$REPLY"
-}
-
-# Return 0 (stale) if the cache file should be regenerated.
-# Checks: missing/empty, artisan newer, composer.lock newer, Laravel command sources (throttled).
-# $cmd_stamp is a project-level file that records the last time the Commands glob ran clean.
-function _artisan_cache_stale() {
-  local cache_file="$1" artisan_path="$2" project_dir="$3" composer_lock="$4" cmd_stamp="$5"
-  [[ ! -f "$cache_file" || ! -s "$cache_file" ]] && return 0
-  [[ "$artisan_path" -nt "$cache_file" ]] && return 0
-  [[ -f "$composer_lock" && "$composer_lock" -nt "$cache_file" ]] && return 0
-
-  # Commands glob: throttled to at most once per $ARTISAN_CMD_CHECK_INTERVAL seconds (default 10).
-  # $EPOCHSECONDS requires zsh/datetime; falls back to always-check (safe) if unavailable.
-  local now=${EPOCHSECONDS:-0}
-  if (( now > 0 )); then
-    local stamp_time=0
-    [[ -f "$cmd_stamp" ]] && stamp_time=$(<"$cmd_stamp")
-    (( now - stamp_time < ${ARTISAN_CMD_CHECK_INTERVAL:-10} )) && return 1
-  fi
-
-  # Limit the scan to Laravel command sources instead of recursing through the whole
-  # project tree. This keeps macOS completions responsive on large repos.
-  local -a cmd_files
-  cmd_files=(
-    $project_dir/app/**/Console/Commands/*.php(N-.)
-    $project_dir/app/Console/Kernel.php(N-.)
-    $project_dir/routes/console.php(N-.)
-    $project_dir/bootstrap/app.php(N-.)
-  )
-  local f
-  for f in $cmd_files; do
-    [[ "$f" -nt "$cache_file" ]] && return 0
-  done
-
-  # Update stamp so the glob is skipped for the next $ARTISAN_CMD_CHECK_INTERVAL seconds.
-  (( now > 0 )) && print -r -- "$now" >"$cmd_stamp"
-  return 1
-}
-
 function _artisan() {
-  local state
-
-  _arguments '1: :->command' '*: :->args'
-
-  _artisan_find || return
-  local artisan_path=$REPLY
-
-  if ! _artisan_jq_available; then
-    >&2 echo "zsh-artisan: jq is not installed. Please install it to use completions."
+  # The binary may have finished downloading since plugin load — or still be
+  # missing, in which case (re)trigger the background download and offer
+  # nothing rather than block the prompt. Hint once per session so a dead tab
+  # isn't a mystery.
+  if [[ -z "$_ARTISAN_COMP_BIN" ]] && ! _artisan_locate_binary; then
+    _artisan_ensure_binary
+    if (( ! ${+_ARTISAN_DOWNLOAD_HINTED} )); then
+      typeset -g _ARTISAN_DOWNLOAD_HINTED=1
+      (( $+functions[_message] )) && _message "artisan completions: binary not ready yet (downloading in background)"
+    fi
     return 1
   fi
 
-  local project_dir=${artisan_path:h}
-  _artisan_hash "$project_dir"; local project_hash=$REPLY
-  local cache_file="${ARTISAN_CACHE_DIR}/${project_hash}.cache"
-  local composer_lock="${project_dir}/composer.lock"
-  # Shared project-level stamp — throttles the Commands glob across all cache operations.
-  local cmd_stamp="${ARTISAN_CACHE_DIR}/${project_hash}.stamp"
+  local out
+  if ! out=$("$_ARTISAN_COMP_BIN" complete --cwd "$PWD" --current "$CURRENT" -- "${words[@]}" 2>/dev/null); then
+    # Most common cause when the binary is present but fails: no php on PATH.
+    if [[ -z "$_ARTISAN_PHP_BIN" ]] && (( ! ${+_ARTISAN_PHP_HINTED} )); then
+      typeset -g _ARTISAN_PHP_HINTED=1
+      (( $+functions[_message] )) && _message "artisan completions: php not found in PATH"
+    fi
+    return 1
+  fi
 
-  case $state in
-  command)
-    # Use the partial word being typed, or fall back to previous word when cursor
-    # is on the command token itself (e.g. `artisan <cursor>`).
-    local last_word=$words[-1]
+  # First line is the prompt title, the rest are "candidate\tdescription" items.
+  local prompt="${out%%$'\n'*}"
+  local items="${out#*$'\n'}"
+  [[ -z "$out" || -z "$items" || "$items" == "$out" ]] && return 0
+
+  local last_word=$words[-1]
+  if (( CURRENT == 2 )); then
     [[ $last_word = "artisan" || -z $last_word ]] && last_word=$words[-2]
     [[ $last_word = "artisan" ]] && last_word=""
-
-    if _artisan_cache_stale "$cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
-      [[ -d "$ARTISAN_CACHE_DIR" ]] || mkdir -p "$ARTISAN_CACHE_DIR"
-      # Filter internal commands (e.g. _complete) at write time — avoids grep on every tab.
-      "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" list --format=json 2>/dev/null \
-        | jq -r '.commands[] | select(.name | startswith("_") | not) | "\(.name)\t\(.description | gsub("\n"; " "))"' \
-        >"$cache_file"
-      [[ ${EPOCHSECONDS:-0} -gt 0 && -s "$cache_file" ]] && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
-      _ARTISAN_LIST_CACHE[$project_hash]=""
-    fi
-
-    if [[ -z "${_ARTISAN_LIST_CACHE[$project_hash]-}" && -s "$cache_file" ]]; then
-      # $(<file) reads without forking. Cache in-memory for repeated completion calls.
-      _ARTISAN_LIST_CACHE[$project_hash]="$(<"$cache_file")"
-    fi
-
-    [[ -n "${_ARTISAN_LIST_CACHE[$project_hash]-}" ]] && _artisan_complete "Artisan Command" "$last_word" "${_ARTISAN_LIST_CACHE[$project_hash]}"
-    ;;
-  args)
-    # Use only the word currently being typed — no fallback to previous word.
-    local last_word=$words[-1]
-
-    local subcmd=$words[2]
-    _artisan_hash "$subcmd"; local subcmd_hash=$REPLY
-    local cmd_cache_file="${ARTISAN_CACHE_DIR}/${project_hash}_${subcmd_hash}.cmd"
-
-    if _artisan_cache_stale "$cmd_cache_file" "$artisan_path" "$project_dir" "$composer_lock" "$cmd_stamp"; then
-      [[ -d "$ARTISAN_CACHE_DIR" ]] || mkdir -p "$ARTISAN_CACHE_DIR"
-      "${_ARTISAN_PHP_BIN:-php}" "$artisan_path" help "$subcmd" --format=json 2>/dev/null >"$cmd_cache_file"
-      [[ ${EPOCHSECONDS:-0} -gt 0 && -s "$cmd_cache_file" ]] && print -r -- "$EPOCHSECONDS" >"$cmd_stamp"
-    fi
-
-    # Empty file means $subcmd is a namespace prefix or unknown — fall back to
-    # prefix-filtered command list (fork-free zsh array operations).
-    if [[ ! -s "$cmd_cache_file" ]]; then
-      if [[ -f "$cache_file" ]]; then
-        local -a all_cmds=("${(f)$(<"$cache_file")}")
-        local ns_items=${(F)${(M)all_cmds:#${subcmd}:*}}
-        [[ -n "$ns_items" ]] && _artisan_complete "Artisan Namespace" "$last_word" "$ns_items"
-      fi
-      return
-    fi
-
-    # Single jq pass: positional arguments + long options + shortcut aliases.
-    local items
-    items=$(jq -r --argjson skip_args '["command"]' --argjson skip_opts "$_ARTISAN_GLOBAL_OPTS" '
-      def hints(v):
-        (if (v.accept_value // false) and (v.is_value_required // true | not) then " [optional value]" else "" end) +
-        (if v.is_multiple // false then " [repeatable]" else "" end) +
-        (if (v.default != null and v.default != false and v.default != "" and (v.default | type) != "array")
-         then " (default: " + (v.default | tostring) + ")" else "" end);
-      (
-        (.definition.arguments // {}) | to_entries[] |
-        select(.value | type == "object") |
-        select([.key] | inside($skip_args) | not) |
-        "<" + .key +
-          (if .value.is_array then "..." elif (.value.is_required | not) then "?" else "" end) +
-        ">" + "\t" +
-        (.value.description // "") + hints(.value)
-      ),
-      (
-        (.definition.options // {}) | to_entries[] |
-        select(.value | type == "object") |
-        select([.key] | inside($skip_opts) | not) |
-        (
-          (.value.name + (if .value.accept_value then "=" else "" end)) + "\t" +
-          (if (.value.shortcut // "") != "" then "(" + .value.shortcut + ") " else "" end) +
-          (.value.description // "") + hints(.value)
-        ),
-        (
-          select((.value.shortcut // "") != "") |
-          (.value.shortcut + (if .value.accept_value then "=" else "" end)) + "\t" +
-          (.value.description // "") + hints(.value)
-        )
-      )
-    ' "$cmd_cache_file" 2>/dev/null)
-
-    _artisan_complete "Artisan Args" "$last_word" "$items"
-    ;;
-  *)
-    _files
-    ;;
-  esac
+  fi
+  _artisan_complete "$prompt" "$last_word" "$items"
 }
+
+compdef _artisan artisan
+
+# ./artisan — zsh strips path prefix for basename lookup, but register explicitly as fallback.
+compdef _artisan './artisan'
+
+# `php artisan ...` — find artisan in the word list and delegate.
+function _artisan_php_wrapper() {
+  local artisan_idx=0 i
+  for (( i = 2; i <= ${#words}; i++ )); do
+    if [[ "${words[$i]}" == "artisan" || "${words[$i]}" == *"/artisan" ]]; then
+      artisan_idx=$i
+      break
+    fi
+  done
+
+  if (( artisan_idx > 0 )); then
+    if (( CURRENT > artisan_idx )); then
+      words=("artisan" "${words[@]:$artisan_idx}")
+      (( CURRENT -= artisan_idx - 1 ))
+      _artisan
+    fi
+    return
+  fi
+
+  _default
+}
+compdef _artisan_php_wrapper php
+
+# `sail artisan ...` — same word-scan delegation as the php wrapper.
+compdef _artisan_php_wrapper sail
