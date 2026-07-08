@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Pre-commit format gate. Enable with `just install-hooks`.
+# Fast (format-only); clippy + tests run in `just check` and CI.
+# Bypass with `git commit --no-verify`.
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 0
+fi
+
+if ! cargo fmt --check >/dev/null 2>&1; then
+    echo "pre-commit: code is not formatted. Run 'just fmt' (or commit with --no-verify)." >&2
+    exit 1
+fi
