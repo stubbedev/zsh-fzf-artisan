@@ -268,7 +268,7 @@ fn load_values(
         "{project_hash}_{}.vals",
         fnv_hex(subcmd.as_bytes())
     ));
-    if !is_stale(&cache_file, || newest_command_source(project)) {
+    if !is_stale(&cache_file, || newest_value_source(project)) {
         if let Ok(text) = fs::read_to_string(&cache_file) {
             let mut vals = values::Values::new();
             for line in text.lines().filter(|l| !l.starts_with('#')) {
@@ -652,10 +652,10 @@ fn is_stale(cache_file: &Path, newest: impl FnOnce() -> Option<SystemTime>) -> b
     newest().is_some_and(|src| src > cache_time)
 }
 
-/// Newest mtime of command-definition sources (drives the list.json and .vals
-/// caches): artisan itself, composer.lock, routes/console.php, bootstrap/app.php,
-/// and every `.php` under any `Console` directory in `app/`. Computed once per
-/// process — a completion run touches one project.
+/// Newest mtime of command-definition sources (drives the list.json cache):
+/// artisan itself, composer.lock, routes/console.php, bootstrap/app.php, and
+/// every `.php` under any `Console` directory in `app/`. Kept narrow so an edit
+/// elsewhere in app/ doesn't force a php re-list. Computed once per process.
 fn newest_command_source(project: &Project) -> Option<SystemTime> {
     static CACHE: OnceLock<Option<SystemTime>> = OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -669,6 +669,21 @@ fn newest_command_source(project: &Project) -> Option<SystemTime> {
             bump(&mut newest, mtime(&p));
         }
         bump(&mut newest, newest_console_php(&project.dir.join("app")));
+        newest
+    })
+}
+
+/// Newest mtime of the sources the `.vals` cache depends on. Value extraction
+/// reads not just the command file but cross-file enums/constants it imports,
+/// which (via PSR-4 App\ → app/) can live anywhere under `app/` — not only under
+/// `Console/`. So this widens `newest_command_source` to every `.php` in `app/`,
+/// ensuring an edit to e.g. an enum backing `--pattern` invalidates the cache.
+/// Only used by the background refresh, so the broad walk never hits a tab press.
+fn newest_value_source(project: &Project) -> Option<SystemTime> {
+    static CACHE: OnceLock<Option<SystemTime>> = OnceLock::new();
+    *CACHE.get_or_init(|| {
+        let mut newest = newest_command_source(project);
+        bump(&mut newest, newest_php_in(&project.dir.join("app")));
         newest
     })
 }
