@@ -91,16 +91,27 @@ fn candidate_files(project_dir: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// Dirs never worth descending: dependency/tooling trees (huge, no Laravel php)
+/// and hidden dirs (`.git`, `.venv`). Skipping them also avoids following the
+/// symlink farms inside Python venvs.
+fn ignored_dir(name: &std::ffi::OsStr) -> bool {
+    let b = name.as_encoded_bytes();
+    matches!(b.first(), Some(b'.')) || matches!(b, b"node_modules" | b"vendor")
+}
+
 fn collect_php_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_php_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "php") {
-            out.push(path);
+        // file_type() avoids an extra stat and does not follow symlinks.
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            if !ignored_dir(&entry.file_name()) {
+                collect_php_files(&entry.path(), out);
+            }
+        } else if ft.is_file() && entry.path().extension().is_some_and(|e| e == "php") {
+            out.push(entry.path());
         }
     }
 }
@@ -112,14 +123,14 @@ pub fn collect_console_php(dir: &Path, out: &mut Vec<PathBuf>) {
         return;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+        let name = entry.file_name();
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) || ignored_dir(&name) {
             continue;
         }
-        if path.file_name().is_some_and(|n| n == "Console") {
-            collect_php_files(&path, out);
+        if name == "Console" {
+            collect_php_files(&entry.path(), out);
         } else {
-            collect_console_php(&path, out);
+            collect_console_php(&entry.path(), out);
         }
     }
 }

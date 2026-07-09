@@ -13,6 +13,7 @@ mod values;
 mod wellknown;
 
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -751,18 +752,29 @@ fn bump(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
     }
 }
 
-/// Newest `.php` mtime under any `Console` directory in the tree.
+/// Dirs never worth descending for command/value/catalog sources: dependency
+/// and tooling trees (huge, no Laravel php) and hidden dirs (`.git`, `.venv`).
+/// Skipping them also sidesteps the symlink farms inside Python venvs.
+fn ignored_dir(name: &OsStr) -> bool {
+    let b = name.as_encoded_bytes();
+    matches!(b.first(), Some(b'.')) || matches!(b, b"node_modules" | b"vendor")
+}
+
+/// Newest `.php` mtime under any `Console` directory in the tree. Uses
+/// `file_type()` (readdir's d_type — no extra stat, and does NOT follow
+/// symlinks, so we never chase venv links into foreign trees).
 fn newest_console_php(dir: &Path) -> Option<SystemTime> {
     let mut newest = None;
     let Ok(entries) = fs::read_dir(dir) else {
         return None;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
+        let name = entry.file_name();
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) || ignored_dir(&name) {
             continue;
         }
-        let found = if path.file_name().is_some_and(|n| n == "Console") {
+        let path = entry.path();
+        let found = if name == "Console" {
             newest_php_in(&path)
         } else {
             newest_console_php(&path)
@@ -778,11 +790,13 @@ fn newest_php_in(dir: &Path) -> Option<SystemTime> {
         return None;
     };
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            bump(&mut newest, newest_php_in(&path));
-        } else if path.extension().is_some_and(|e| e == "php") {
-            bump(&mut newest, mtime(&path));
+        let Ok(ft) = entry.file_type() else { continue };
+        if ft.is_dir() {
+            if !ignored_dir(&entry.file_name()) {
+                bump(&mut newest, newest_php_in(&entry.path()));
+            }
+        } else if ft.is_file() && entry.path().extension().is_some_and(|e| e == "php") {
+            bump(&mut newest, entry.metadata().and_then(|m| m.modified()).ok());
         }
     }
     newest
