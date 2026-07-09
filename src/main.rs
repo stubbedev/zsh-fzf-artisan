@@ -695,6 +695,11 @@ fn is_stale(cache_file: &Path, newest: impl FnOnce() -> Option<SystemTime>) -> b
 /// artisan itself, composer.lock, routes/console.php, bootstrap/app.php, and
 /// every `.php` under any `Console` directory in `app/`. Kept narrow so an edit
 /// elsewhere in app/ doesn't force a php re-list. Computed once per process.
+///
+/// Also watches `.git/HEAD`, rewritten on every branch switch: a checkout that
+/// only *removes* command files leaves every surviving file's mtime older than
+/// the cache, so a pure mtime-max would never see the switch and keep serving
+/// commands that no longer exist. HEAD's mtime always advances on checkout.
 fn newest_command_source(project: &Project) -> Option<SystemTime> {
     static CACHE: OnceLock<Option<SystemTime>> = OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -708,6 +713,7 @@ fn newest_command_source(project: &Project) -> Option<SystemTime> {
             bump(&mut newest, mtime(&p));
         }
         bump(&mut newest, newest_console_php(&project.dir.join("app")));
+        bump(&mut newest, git_head_mtime(&project.dir));
         newest
     })
 }
@@ -740,8 +746,32 @@ fn newest_catalog_source(project: &Project) -> Option<SystemTime> {
                 }
             }
         }
+        bump(&mut newest, git_head_mtime(&project.dir));
         newest
     })
+}
+
+/// mtime of the repo's `HEAD`, which git rewrites on every branch switch —
+/// so a checkout invalidates the caches even when it only deletes files.
+/// Handles linked worktrees, where `.git` is a file `gitdir: <path>` and the
+/// real HEAD lives under that path (a relative one is resolved against `dir`).
+fn git_head_mtime(dir: &Path) -> Option<SystemTime> {
+    let dot = dir.join(".git");
+    if dot.is_dir() {
+        return mtime(&dot.join("HEAD"));
+    }
+    let gitdir = fs::read_to_string(&dot)
+        .ok()?
+        .strip_prefix("gitdir:")?
+        .trim()
+        .to_string();
+    let gitdir = Path::new(&gitdir);
+    let head = if gitdir.is_absolute() {
+        gitdir.join("HEAD")
+    } else {
+        dir.join(gitdir).join("HEAD")
+    };
+    mtime(&head)
 }
 
 fn bump(newest: &mut Option<SystemTime>, candidate: Option<SystemTime>) {
