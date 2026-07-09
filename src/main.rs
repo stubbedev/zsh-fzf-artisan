@@ -460,20 +460,9 @@ fn complete_args(
             if already_filled {
                 continue;
             }
-            let suffix = if is_array {
-                "..."
-            } else if !arg
-                .get("is_required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                "?"
-            } else {
-                ""
-            };
-            let desc = arg.get("description").and_then(Value::as_str).unwrap_or("");
-            out.push_str(&format!("<{key}{suffix}>\t{}{}\n", clean(desc), hints(arg)));
-            // Known values, right below their argument.
+            // Offer this positional's known values. No `<name>` placeholder is
+            // emitted: selecting one would insert an empty `""`, not valid text.
+            // A positional whose values we can't determine contributes nothing.
             for v in combined(Kind::Argument, key) {
                 out.push_str(&format!("{v}\t<{key}> value\n"));
             }
