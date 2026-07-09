@@ -796,7 +796,10 @@ fn newest_php_in(dir: &Path) -> Option<SystemTime> {
                 bump(&mut newest, newest_php_in(&entry.path()));
             }
         } else if ft.is_file() && entry.path().extension().is_some_and(|e| e == "php") {
-            bump(&mut newest, entry.metadata().and_then(|m| m.modified()).ok());
+            bump(
+                &mut newest,
+                entry.metadata().and_then(|m| m.modified()).ok(),
+            );
         }
     }
     newest
