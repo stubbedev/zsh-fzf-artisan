@@ -598,9 +598,9 @@ fn option_used(prior_words: &[&str], name: &str, shortcut: &str) -> bool {
     let hit = |w: &str, flag: &str| {
         !flag.is_empty() && (w == flag || w.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
     };
-    prior_words.iter().any(|w| {
-        hit(w, name) || shortcut.split('|').any(|sc| hit(w, sc.trim()))
-    })
+    prior_words
+        .iter()
+        .any(|w| hit(w, name) || shortcut.split('|').any(|sc| hit(w, sc.trim())))
 }
 
 // --- cache -----------------------------------------------------------------

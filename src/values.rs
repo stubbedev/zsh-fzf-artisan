@@ -1457,8 +1457,7 @@ class Move extends Command
     #[test]
     fn array_column_name_yields_case_names() {
         // array_column(Enum::cases(), 'name') selects case NAMES, not values.
-        let dir =
-            std::env::temp_dir().join(format!("artisan-comp-acol-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("artisan-comp-acol-{}", std::process::id()));
         let enums = dir.join("app/Enums");
         fs::create_dir_all(&enums).unwrap();
         fs::write(
@@ -1503,7 +1502,10 @@ class Go extends Command
 
         let mode = &out[&(Kind::Option, "mode".to_string())];
         for v in ["Fast", "Slow"] {
-            assert!(mode.iter().any(|s| s == v), "missing case name {v}: {mode:?}");
+            assert!(
+                mode.iter().any(|s| s == v),
+                "missing case name {v}: {mode:?}"
+            );
         }
     }
 }
