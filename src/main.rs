@@ -540,7 +540,9 @@ fn hints(v: &Value) -> String {
             Value::Number(n) => Some(n.to_string()),
         };
         if let Some(d) = display {
-            h.push_str(&format!(" (default: {d})"));
+            // clean(): a default with a newline/tab would otherwise split the
+            // TSV line and spawn a bogus completion candidate.
+            h.push_str(&format!(" (default: {})", clean(&d)));
         }
     }
     h
@@ -872,5 +874,18 @@ mod tests {
         assert!(!option_used(&["source"], "--mode", "-m"));
         // Empty shortcut must never match a bare word.
         assert!(!option_used(&["source"], "--force", ""));
+    }
+
+    #[test]
+    fn hint_default_is_tsv_safe() {
+        // A default containing a newline/tab must not break the TSV line (which
+        // would spawn a bogus completion candidate).
+        let v = serde_json::json!({ "accept_value": true, "default": "a\nb\tc" });
+        let h = hints(&v);
+        assert!(
+            !h.contains('\n') && !h.contains('\t'),
+            "hint must stay on one TSV field: {h:?}"
+        );
+        assert!(h.contains("default:"), "default should still be shown: {h:?}");
     }
 }
