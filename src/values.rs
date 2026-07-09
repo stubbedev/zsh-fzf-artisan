@@ -59,17 +59,25 @@ impl EnumCases {
     }
 }
 
-pub fn extract(project_dir: &Path, cmd: &str) -> Values {
+/// Extract candidate values for `cmd`, and return the set of files the result
+/// depends on (the command file(s) plus any cross-file enum/constant sources).
+/// The caller stats those for cache invalidation — far cheaper and more precise
+/// than walking the whole project.
+pub fn extract(project_dir: &Path, cmd: &str) -> (Values, Vec<PathBuf>) {
     let mut out = Values::new();
+    let mut deps = Vec::new();
     for path in candidate_files(project_dir) {
         // Single read per candidate: the same bytes serve the
         // defines-command check and the extraction parse.
         let Ok(src) = fs::read(&path) else { continue };
         if defines_command(&src, cmd) {
-            extract_from(&src, project_dir, &mut out);
+            deps.push(path.clone());
+            deps.extend(extract_from(&src, project_dir, &mut out));
         }
     }
-    out
+    deps.sort();
+    deps.dedup();
+    (out, deps)
 }
 
 /// PHP files that may define commands: every `.php` under any directory named
@@ -151,7 +159,9 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
-fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) {
+/// Fill `out` with values extracted from one command's source; return the paths
+/// of any cross-file enum/constant sources read (for dependency-based caching).
+fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) -> Vec<PathBuf> {
     let arena = LocalArena::new();
     let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"cmd.php"), src);
 
@@ -164,6 +174,7 @@ fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) {
         class_consts: HashMap::new(),
         project_dir: project_dir.to_path_buf(),
         out: std::mem::take(out),
+        deps: Vec::new(),
         collect: false,
     };
     // Pass 1 records same-file class constants (which may be defined after the
@@ -173,6 +184,7 @@ fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) {
     ctx.collect = true;
     walk_program(&Extractor, program, &mut ctx);
     *out = ctx.out;
+    ctx.deps
 }
 
 /// Maps imported short name → FQN. Handles plain (`use App\Enums\Source;`),
@@ -268,6 +280,9 @@ struct Ctx {
     class_consts: HashMap<String, Option<HashMap<String, Vec<String>>>>,
     project_dir: PathBuf,
     out: Values,
+    /// Cross-file source paths read during extraction (enums, class constants),
+    /// reported so the cache can invalidate when one of them changes.
+    deps: Vec<PathBuf>,
     collect: bool,
 }
 
@@ -310,9 +325,13 @@ impl Ctx {
         if let Some(memo) = self.enums.get(written) {
             return memo.clone();
         }
-        let result = self
-            .resolve_app_class(written)
-            .and_then(|(path, short)| load_enum_cases(&path, &short));
+        let result = match self.resolve_app_class(written) {
+            Some((path, short)) => {
+                self.deps.push(path.clone()); // dependency, even if the file is absent
+                load_enum_cases(&path, &short)
+            }
+            None => None,
+        };
         self.enums.insert(written.to_string(), result.clone());
         result
     }
@@ -321,9 +340,13 @@ impl Ctx {
     /// file — resolved by loading that class and reading the constant (memoized).
     fn class_const(&mut self, class: &str, name: &str) -> Vec<String> {
         if !self.class_consts.contains_key(class) {
-            let loaded = self
-                .resolve_app_class(class)
-                .map(|(path, short)| load_class_consts(&path, &short));
+            let loaded = match self.resolve_app_class(class) {
+                Some((path, short)) => {
+                    self.deps.push(path.clone()); // dependency, even if the file is absent
+                    Some(load_class_consts(&path, &short))
+                }
+                None => None,
+            };
             self.class_consts.insert(class.to_string(), loaded);
         }
         self.class_consts
@@ -1043,7 +1066,7 @@ class ChargeCommand extends Command
         )
         .unwrap();
 
-        let out = extract(&dir, "billing:charge");
+        let (out, _deps) = extract(&dir, "billing:charge");
         let _ = fs::remove_dir_all(&dir);
 
         let tier = &out[&(Kind::Argument, "tier".to_string())];
@@ -1100,7 +1123,13 @@ class SyncCommand extends Command
 }
 "#;
         let mut out = Values::new();
-        extract_from(cmd.as_bytes(), &dir, &mut out);
+        let deps = extract_from(cmd.as_bytes(), &dir, &mut out);
+        // The resolved enum file is reported as a dependency for cache
+        // invalidation — editing it must be able to refresh completions.
+        assert!(
+            deps.iter().any(|p| p.ends_with("app/Enums/Source.php")),
+            "enum file should be a reported dependency: {deps:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
 
         let source = &out[&(Kind::Argument, "source".to_string())];

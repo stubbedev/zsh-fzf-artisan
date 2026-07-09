@@ -264,11 +264,10 @@ fn load_values(
     project_hash: &str,
     subcmd: &str,
 ) -> values::Values {
-    let cache_file = cache_dir.join(format!(
-        "{project_hash}_{}.vals",
-        fnv_hex(subcmd.as_bytes())
-    ));
-    if !is_stale(&cache_file, || newest_value_source(project)) {
+    let stem = format!("{project_hash}_{}", fnv_hex(subcmd.as_bytes()));
+    let cache_file = cache_dir.join(format!("{stem}.vals"));
+    let deps_file = cache_dir.join(format!("{stem}.deps"));
+    if !vals_is_stale(&cache_file, &deps_file) {
         if let Ok(text) = fs::read_to_string(&cache_file) {
             let mut vals = values::Values::new();
             for line in text.lines().filter(|l| !l.starts_with('#')) {
@@ -289,7 +288,7 @@ fn load_values(
             return vals;
         }
     }
-    let vals = values::extract(&project.dir, subcmd);
+    let (vals, deps) = values::extract(&project.dir, subcmd);
     // Header line keeps the file non-empty when nothing was found, so an
     // empty result doesn't read as a stale cache.
     let mut text = String::from("# artisan-comp values\n");
@@ -303,7 +302,46 @@ fn load_values(
         }
     }
     write_atomic(&cache_file, text.as_bytes());
+    // Record the exact files this result depends on, so the next staleness check
+    // stats only those instead of walking the project.
+    let deps_text: String = deps
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("\n");
+    write_atomic(&deps_file, deps_text.as_bytes());
     vals
+}
+
+/// Staleness for the `.vals` cache, based on its recorded dependency files
+/// (command source + cross-file enums/constants) rather than a project walk.
+/// Foreground never checks deps (serves the cache); only the background refresh
+/// does, so a tab press never stats the dependency set.
+fn vals_is_stale(cache_file: &Path, deps_file: &Path) -> bool {
+    let Ok(meta) = fs::metadata(cache_file) else {
+        return true;
+    };
+    if meta.len() == 0 {
+        return true;
+    }
+    if !refreshing() {
+        return false;
+    }
+    let Ok(cache_time) = meta.modified() else {
+        return true;
+    };
+    // Missing deps list (older cache) → regenerate to (re)establish it.
+    let Ok(deps) = fs::read_to_string(deps_file) else {
+        return true;
+    };
+    for dep in deps.lines().filter(|l| !l.is_empty()) {
+        match mtime(Path::new(dep)) {
+            Some(t) if t > cache_time => return true,
+            None => return true, // a dependency vanished — result may have changed
+            _ => {}
+        }
+    }
+    false
 }
 
 fn complete_args(
@@ -669,21 +707,6 @@ fn newest_command_source(project: &Project) -> Option<SystemTime> {
             bump(&mut newest, mtime(&p));
         }
         bump(&mut newest, newest_console_php(&project.dir.join("app")));
-        newest
-    })
-}
-
-/// Newest mtime of the sources the `.vals` cache depends on. Value extraction
-/// reads not just the command file but cross-file enums/constants it imports,
-/// which (via PSR-4 App\ → app/) can live anywhere under `app/` — not only under
-/// `Console/`. So this widens `newest_command_source` to every `.php` in `app/`,
-/// ensuring an edit to e.g. an enum backing `--pattern` invalidates the cache.
-/// Only used by the background refresh, so the broad walk never hits a tab press.
-fn newest_value_source(project: &Project) -> Option<SystemTime> {
-    static CACHE: OnceLock<Option<SystemTime>> = OnceLock::new();
-    *CACHE.get_or_init(|| {
-        let mut newest = newest_command_source(project);
-        bump(&mut newest, newest_php_in(&project.dir.join("app")));
         newest
     })
 }
