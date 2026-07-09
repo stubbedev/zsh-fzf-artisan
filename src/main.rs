@@ -372,11 +372,12 @@ fn complete_args(
             if let Some(name) = opt.get("name").and_then(Value::as_str) {
                 value_opts.insert(name, key);
             }
-            match opt.get("shortcut").and_then(Value::as_str) {
-                Some(s) if !s.is_empty() => {
-                    value_opts.insert(s, key);
+            // Symfony joins multiple shortcuts with `|` (e.g. "-a|-b"); register
+            // each so a typed `-a` is recognized as this option.
+            if let Some(s) = opt.get("shortcut").and_then(Value::as_str) {
+                for sc in s.split('|').map(str::trim).filter(|s| !s.is_empty()) {
+                    value_opts.insert(sc, key);
                 }
-                _ => {}
             }
         }
     }
@@ -486,7 +487,18 @@ fn complete_args(
                 .unwrap_or(false);
             let eq = if accepts { "=" } else { "" };
             let name = opt.get("name").and_then(Value::as_str).unwrap_or("");
+            // No name → nothing valid to insert; skip rather than emit `=`.
+            if name.is_empty() {
+                continue;
+            }
             let shortcut = opt.get("shortcut").and_then(Value::as_str).unwrap_or("");
+            // Symfony may pipe-join several shortcuts ("-a|-b"); emit each as its
+            // own candidate so none is an uninsertable `-a|-b=` token.
+            let shortcuts: Vec<&str> = shortcut
+                .split('|')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .collect();
             // Drop options already present on the line, unless repeatable.
             let multiple = opt
                 .get("is_multiple")
@@ -497,14 +509,14 @@ fn complete_args(
             }
             let desc = clean(opt.get("description").and_then(Value::as_str).unwrap_or(""));
             let hint = hints(opt);
-            let shortcut_prefix = if shortcut.is_empty() {
+            let shortcut_prefix = if shortcuts.is_empty() {
                 String::new()
             } else {
-                format!("({shortcut}) ")
+                format!("({}) ", shortcuts.join("|"))
             };
             out.push_str(&format!("{name}{eq}\t{shortcut_prefix}{desc}{hint}\n"));
-            if !shortcut.is_empty() {
-                out.push_str(&format!("{shortcut}{eq}\t{desc}{hint}\n"));
+            for sc in &shortcuts {
+                out.push_str(&format!("{sc}{eq}\t{desc}{hint}\n"));
             }
         }
     }
@@ -580,12 +592,15 @@ fn scan_prior_words(prior_words: &[&str], takes_value: impl Fn(&str) -> bool) ->
 }
 
 /// Whether an option (by long name and shortcut) already appears on the line,
-/// in either `--opt`/`-o` or `--opt=x`/`-o=x` form.
+/// in either `--opt`/`-o` or `--opt=x`/`-o=x` form. `shortcut` may be a Symfony
+/// pipe-joined list of aliases (`-a|-b`), each checked independently.
 fn option_used(prior_words: &[&str], name: &str, shortcut: &str) -> bool {
     let hit = |w: &str, flag: &str| {
         !flag.is_empty() && (w == flag || w.strip_prefix(flag).is_some_and(|r| r.starts_with('=')))
     };
-    prior_words.iter().any(|w| hit(w, name) || hit(w, shortcut))
+    prior_words.iter().any(|w| {
+        hit(w, name) || shortcut.split('|').any(|sc| hit(w, sc.trim()))
+    })
 }
 
 // --- cache -----------------------------------------------------------------
@@ -874,6 +889,10 @@ mod tests {
         assert!(!option_used(&["source"], "--mode", "-m"));
         // Empty shortcut must never match a bare word.
         assert!(!option_used(&["source"], "--force", ""));
+        // Pipe-joined shortcuts: each alias is checked independently.
+        assert!(option_used(&["-a"], "--all", "-a|-b"));
+        assert!(option_used(&["-b=x"], "--all", "-a|-b"));
+        assert!(!option_used(&["-c"], "--all", "-a|-b"));
     }
 
     #[test]

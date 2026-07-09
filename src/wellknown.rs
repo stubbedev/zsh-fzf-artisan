@@ -87,7 +87,9 @@ impl Catalog {
         let mut out = String::from("# catalog\n");
         let mut section = |tag: &str, items: &[String]| {
             for v in items {
-                if !v.contains('\n') {
+                // A tab or newline would split the TSV line and later be emitted
+                // as a spurious completion candidate — drop such values.
+                if !v.contains(['\n', '\t']) {
                     out.push_str(tag);
                     out.push('\t');
                     out.push_str(v);

@@ -48,6 +48,17 @@ struct EnumCases {
     names: Vec<String>,
 }
 
+impl EnumCases {
+    /// Backed values in source (case) order — deterministic, unlike iterating
+    /// the `values` HashMap, so completions and the .vals cache are stable.
+    fn ordered_values(&self) -> Vec<String> {
+        self.names
+            .iter()
+            .filter_map(|n| self.values.get(n).cloned())
+            .collect()
+    }
+}
+
 pub fn extract(project_dir: &Path, cmd: &str) -> Values {
     let mut out = Values::new();
     for path in candidate_files(project_dir) {
@@ -155,8 +166,9 @@ fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) {
         out: std::mem::take(out),
         collect: false,
     };
-    // Pass 1 records aliases and class constants, pass 2 collects values — so
-    // a definition after its use (rare, but legal) still resolves.
+    // Pass 1 records same-file class constants (which may be defined after the
+    // method that uses them). Pass 2 collects values; it also re-records aliases
+    // as it walks so a reused variable resolves to its current binding.
     walk_program(&Extractor, program, &mut ctx);
     ctx.collect = true;
     walk_program(&Extractor, program, &mut ctx);
@@ -202,7 +214,10 @@ fn parse_use_stmt(stmt: &str, map: &mut HashMap<String, String>) {
         .trim()
         .trim_end_matches(';')
         .trim();
-    if rest.starts_with("function ") || rest.starts_with("const ") {
+    // `use function`/`use const` imports, and a closure capture (`function () use
+    // ($x) { ... }`) whose `use (...)` landed at a line start — neither is a
+    // class import; skip so they don't pollute the alias map with garbage.
+    if rest.starts_with("function ") || rest.starts_with("const ") || rest.starts_with('(') {
         return;
     }
     let mut insert = |name: &str, alias: Option<&str>| {
@@ -440,19 +455,27 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
 
     fn walk_in_expression(&self, expression: &'ast Expression<'arena>, ctx: &mut Ctx) {
         match expression {
-            // $var = $this->argument('name');  (alias, recorded in pass 1)
+            // $var = $this->argument('name');  (alias)
+            // Recorded in BOTH passes: pass 1 gives a binding for uses that
+            // precede the assignment in source (rare); re-recording in pass 2
+            // keeps the binding current as we walk, so a variable reused for a
+            // different option (`$v = option('a'); ...; $v = option('b'); ...`)
+            // attributes each comparison to whichever option was last assigned.
             Expression::Assignment(a) if a.operator.is_assign() => {
-                if ctx.collect {
-                    return;
-                }
                 if let Expression::Variable(Variable::Direct(dv)) = a.lhs {
                     if let Some(r) = expr_ref(a.rhs, ctx) {
                         ctx.aliases.insert(dv.name.to_vec(), r);
+                    } else {
+                        // Reassigned to something unrelated — drop the stale ref
+                        // so it isn't misattributed to a later comparison.
+                        ctx.aliases.remove(dv.name as &[u8]);
                     }
                     // Var holding a literal array or enum chain → record its set
                     // so `in_array($x, $var)` can resolve the values.
                     let vals = collect_strings(a.rhs, ctx);
-                    if !vals.is_empty() {
+                    if vals.is_empty() {
+                        ctx.value_aliases.remove(dv.name as &[u8]);
+                    } else {
                         ctx.value_aliases.insert(dv.name.to_vec(), vals);
                     }
                 }
@@ -530,7 +553,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
                 };
                 let written = utf8(cid.value());
                 if let Some(cases) = ctx.enum_cases(&written) {
-                    ctx.add_all(&r, cases.values.into_values().collect());
+                    ctx.add_all(&r, cases.ordered_values());
                 }
             }
             // match ($this->argument('x')) { 'a', self::B, Enum::C->value => ... }
@@ -808,26 +831,40 @@ fn enum_chain(expr: &Expression, ctx: &mut Ctx, field: EnumField) -> Vec<String>
             };
             match ctx.enum_cases(&utf8(cid.value())) {
                 Some(cases) => match field {
-                    EnumField::Value => cases.values.into_values().collect(),
+                    EnumField::Value => cases.ordered_values(),
                     EnumField::Name => cases.names,
                 },
                 None => Vec::new(),
             }
         }
-        // collect(X) / array_column(X, _) / array_map(_, X) / array_values(X)
+        // collect(X) / array_column(X, 'name'|'value') / array_map(_, X) / array_values(X)
         Expression::Call(Call::Function(fc)) => {
             let Expression::Identifier(id) = fc.function else {
                 return Vec::new();
             };
             let args: Vec<_> = fc.argument_list.arguments.iter().collect();
-            let inner = match id.last_segment().to_ascii_lowercase().as_slice() {
-                b"collect" | b"array_column" | b"array_values" | b"array_unique" => args.first(),
-                b"array_map" => args.get(1),
-                _ => return Vec::new(),
-            };
-            inner
-                .map(|a| enum_chain(a.value(), ctx, field))
-                .unwrap_or_default()
+            match id.last_segment().to_ascii_lowercase().as_slice() {
+                // array_column's 2nd arg picks the field ('name' vs 'value').
+                b"array_column" => {
+                    let field = match args.get(1).and_then(|a| lit_str(a.value())).as_deref() {
+                        Some("name") => EnumField::Name,
+                        Some("value") => EnumField::Value,
+                        _ => field,
+                    };
+                    args.first()
+                        .map(|a| enum_chain(a.value(), ctx, field))
+                        .unwrap_or_default()
+                }
+                b"collect" | b"array_values" | b"array_unique" => args
+                    .first()
+                    .map(|a| enum_chain(a.value(), ctx, field))
+                    .unwrap_or_default(),
+                b"array_map" => args
+                    .get(1)
+                    .map(|a| enum_chain(a.value(), ctx, field))
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
         }
         // ->toArray()/->all()/->values(): identity. ->pluck('name'|'value'): pick field.
         Expression::Call(Call::Method(mc)) => {
@@ -1368,6 +1405,105 @@ class Paint extends Command
         let color = &out[&(Kind::Option, "color".to_string())];
         for v in ["red", "green", "blue"] {
             assert!(color.iter().any(|s| s == v), "missing color {v}: {color:?}");
+        }
+    }
+
+    #[test]
+    fn reused_variable_attributes_to_the_last_assigned_option() {
+        // A variable reused for a second option must not leak the first option's
+        // values, nor steal the second's. Each comparison attaches to whichever
+        // option was last assigned to the variable.
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+
+class Move extends Command
+{
+    protected $signature = 'app:move {--from=} {--to=}';
+
+    public function handle(): int
+    {
+        $value = $this->option('from');
+        if ($value === 'github') {
+            return 1;
+        }
+        $value = $this->option('to');
+        if ($value === 'gitlab') {
+            return 1;
+        }
+
+        return 0;
+    }
+}
+"#;
+        let dir = std::env::temp_dir().join(format!("artisan-comp-reuse-{}", std::process::id()));
+        let mut out = Values::new();
+        extract_from(cmd.as_bytes(), &dir, &mut out);
+
+        assert_eq!(
+            out.get(&(Kind::Option, "from".to_string())),
+            Some(&vec!["github".to_string()]),
+            "--from should get only its own value"
+        );
+        assert_eq!(
+            out.get(&(Kind::Option, "to".to_string())),
+            Some(&vec!["gitlab".to_string()]),
+            "--to should get only its own value"
+        );
+    }
+
+    #[test]
+    fn array_column_name_yields_case_names() {
+        // array_column(Enum::cases(), 'name') selects case NAMES, not values.
+        let dir =
+            std::env::temp_dir().join(format!("artisan-comp-acol-{}", std::process::id()));
+        let enums = dir.join("app/Enums");
+        fs::create_dir_all(&enums).unwrap();
+        fs::write(
+            enums.join("Mode.php"),
+            r#"<?php
+
+namespace App\Enums;
+
+enum Mode: string
+{
+    case Fast = 'f';
+    case Slow = 's';
+}
+"#,
+        )
+        .unwrap();
+
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use App\Enums\Mode;
+use Illuminate\Console\Command;
+
+class Go extends Command
+{
+    protected $signature = 'app:go {--mode=}';
+
+    public function handle(): int
+    {
+        if (!in_array($this->option('mode'), array_column(Mode::cases(), 'name'))) {
+            return 1;
+        }
+
+        return 0;
+    }
+}
+"#;
+        let mut out = Values::new();
+        extract_from(cmd.as_bytes(), &dir, &mut out);
+        let _ = fs::remove_dir_all(&dir);
+
+        let mode = &out[&(Kind::Option, "mode".to_string())];
+        for v in ["Fast", "Slow"] {
+            assert!(mode.iter().any(|s| s == v), "missing case name {v}: {mode:?}");
         }
     }
 }
