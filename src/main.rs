@@ -886,6 +886,9 @@ mod tests {
             !h.contains('\n') && !h.contains('\t'),
             "hint must stay on one TSV field: {h:?}"
         );
-        assert!(h.contains("default:"), "default should still be shown: {h:?}");
+        assert!(
+            h.contains("default:"),
+            "default should still be shown: {h:?}"
+        );
     }
 }
