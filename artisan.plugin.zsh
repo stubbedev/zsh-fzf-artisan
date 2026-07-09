@@ -200,6 +200,30 @@ function _artisan_find() {
   return 1
 }
 
+#--------------------------------------------------------------------------
+# background pre-warm on directory change
+#--------------------------------------------------------------------------
+
+# The first `artisan <Tab>` in a project has no cache to serve, so it would
+# otherwise block on `php artisan list`. Kick a background build when entering a
+# project so that first tab is warm instead. Gated to once per project root per
+# shell; the binary itself skips the php run when the cache is already fresh, so
+# re-entering a warm project only costs a cheap stat walk.
+typeset -gA _ARTISAN_WARMED
+
+function _artisan_prewarm() {
+  [[ -n "$_ARTISAN_COMP_BIN" ]] || _artisan_locate_binary || return
+  _artisan_find || return
+  local root="${REPLY:h}"
+  [[ -n "${_ARTISAN_WARMED[$root]}" ]] && return
+  _ARTISAN_WARMED[$root]=1
+  "$_ARTISAN_COMP_BIN" refresh --cwd "$root" --current 2 -- artisan "" &>/dev/null &!
+}
+
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook chpwd _artisan_prewarm
+# Warm the directory the shell started in, too.
+_artisan_prewarm
+
 function artisan() {
   _artisan_find || {
     >&2 echo "zsh-artisan: artisan not found. Are you in a Laravel directory?"
