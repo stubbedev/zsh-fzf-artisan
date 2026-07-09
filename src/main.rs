@@ -814,10 +814,17 @@ fn newest_console_php(dir: &Path) -> Option<SystemTime> {
     newest
 }
 
+/// Newest mtime of the directory itself plus every `.php` under it. The
+/// directory's own mtime is tracked because POSIX bumps it whenever an entry is
+/// added, removed, or renamed — so a `mv`/`rm`/`git` operation that changes the
+/// *set* of command files (without leaving any file whose mtime beats the
+/// cache) is still seen. A plain in-place content edit bumps the file's mtime
+/// instead. Both together catch every change short of a mtime-preserving
+/// overwrite (`cp -p` over an existing file), which no stat-based scheme can see.
 fn newest_php_in(dir: &Path) -> Option<SystemTime> {
-    let mut newest = None;
+    let mut newest = mtime(dir);
     let Ok(entries) = fs::read_dir(dir) else {
-        return None;
+        return newest;
     };
     for entry in entries.flatten() {
         let Ok(ft) = entry.file_type() else { continue };
@@ -961,6 +968,24 @@ mod tests {
         assert!(stale2, "a source newer than the cache must be stale");
 
         REFRESH_MODE.store(false, Ordering::Relaxed);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dir_mtime_is_tracked_even_without_php_files() {
+        // A rename/delete can change the *set* of command files while leaving no
+        // .php whose mtime beats the cache — but it bumps the directory's own
+        // mtime. The walk must surface that. With only non-.php entries the
+        // old file-only walk returned None; the dir mtime must now stand in.
+        let dir = env::temp_dir().join(format!("artisan-comp-dirmtime-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("notes.txt"), b"x").unwrap();
+        assert_eq!(
+            newest_php_in(&dir),
+            mtime(&dir),
+            "directory mtime must be tracked even when it holds no .php files"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
