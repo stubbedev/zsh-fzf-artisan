@@ -167,7 +167,9 @@ The binary:
 
 ## Releasing (maintainers)
 
-Bump `version` in `Cargo.toml`, tag the commit `v<version>`, push the tag. CI builds Linux (musl) and macOS binaries for both architectures and attaches them to the GitHub release. Installed plugins detect the version change on their next shell load and download the new binary automatically.
+Bump `version` in `Cargo.toml`, tag the commit `v<version>`, push the tag. CI builds Linux (musl) and macOS binaries for both architectures and attaches them to the GitHub release.
+
+Installed plugins track the newest GitHub release automatically — no `git pull` required to receive a new binary. The shim resolves the latest release tag (via the `releases/latest` redirect, throttled to once a day) and silently downloads the matching binary in the background on a subsequent shell; the update is checksum-verified and invisible to the user. The `Cargo.toml` version is only a fallback used before the first successful lookup (fresh clone, offline, or `curl` unavailable). Changes to the plugin's own `.zsh` script still require updating the checkout.
 
 ## License
 

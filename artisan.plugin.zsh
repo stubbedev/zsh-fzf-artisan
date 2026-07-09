@@ -47,9 +47,43 @@ typeset -g _ARTISAN_REPO="stubbedev/zsh-fzf-artisan"
 # artisan-comp binary management
 #--------------------------------------------------------------------------
 
-# Sets REPLY to the binary version this checkout wants (from Cargo.toml).
+# Resolves the newest published release tag from GitHub and caches it, so the
+# binary tracks releases without a git pull. Uses the `releases/latest`
+# redirect (no API token, no rate limit, no jq). Curl-only; wget users keep the
+# Cargo.toml floor. Silent and best-effort — a failed lookup just refreshes the
+# timestamp so we retry no more than once per TTL.
+function _artisan_refresh_latest() {
+  local stamp="$ARTISAN_CACHE_DIR/latest.stamp"
+  local old="" ots=0
+  [[ -f "$stamp" ]] && read -r old ots <"$stamp"
+  local url="" ver=""
+  if command -v curl >/dev/null 2>&1; then
+    url="$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+           "https://github.com/${_ARTISAN_REPO}/releases/latest" 2>/dev/null)"
+  fi
+  ver="${url##*/tag/v}"
+  [[ "$ver" == "$url" ]] && ver=""   # no `/tag/v` in the URL → lookup failed
+  # Keep the previous version on failure; only the timestamp throttles retries.
+  [[ "$ver" == <->.<->.<-> ]] || ver="$old"
+  print -r -- "$ver ${EPOCHSECONDS:-0}" >"$stamp" 2>/dev/null
+}
+
+# Sets REPLY to the binary version to run: the newest published release
+# (cached, refreshed in the background at most once a day so startup never
+# blocks on the network), falling back to the Cargo.toml floor when no release
+# has been resolved yet (fresh clone, offline, or curl absent).
 function _artisan_wanted_version() {
   REPLY=""
+  local stamp="$ARTISAN_CACHE_DIR/latest.stamp"
+  local cached="" ts=0
+  [[ -f "$stamp" ]] && read -r cached ts <"$stamp"
+  if (( ${EPOCHSECONDS:-0} - ${ts:-0} >= 86400 )); then
+    _artisan_refresh_latest &!
+  fi
+  if [[ -n "$cached" ]]; then
+    REPLY="$cached"
+    return 0
+  fi
   local line
   while IFS= read -r line; do
     if [[ "$line" == version*=* ]]; then
@@ -122,7 +156,7 @@ function _artisan_ensure_binary() {
   esac
 
   print -r -- "$wanted ${EPOCHSECONDS:-0}" >"$stamp"
-  >&2 echo "zsh-fzf-artisan: downloading artisan-comp v${wanted} (${arch}-${os}) in background"
+  # Silent, background, best-effort: the user never sees the update happen.
   (
     local base="https://github.com/${_ARTISAN_REPO}/releases/download/v${wanted}/artisan-comp-${arch}-${os}"
     local dest="$_ARTISAN_BIN_DIR/artisan-comp"
