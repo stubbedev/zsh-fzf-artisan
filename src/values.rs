@@ -23,9 +23,9 @@ use std::path::{Path, PathBuf};
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_syntax::cst::cst::{
-    Access, Argument, Call, ClassLikeConstant, ClassLikeConstantSelector, ClassLikeMember,
-    ClassLikeMemberSelector, EnumCaseItem, Expression, Foreach, ForeachTarget, Literal, MatchArm,
-    NamespaceBody, Statement, SwitchCase, Variable,
+    Access, Argument, ArrayElement, Call, ClassLikeConstant, ClassLikeConstantSelector,
+    ClassLikeMember, ClassLikeMemberSelector, EnumCaseItem, Expression, Foreach, ForeachTarget,
+    IfBody, Literal, MatchArm, NamespaceBody, Statement, SwitchCase, Variable,
 };
 use mago_syntax::walker::{walk_program, Walker};
 
@@ -163,7 +163,7 @@ fn defines_command(src: &[u8], cmd: &str) -> bool {
     false
 }
 
-fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+pub(crate) fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     if needle.len() > haystack.len() {
         return None;
     }
@@ -172,6 +172,9 @@ fn find_sub(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Fill `out` with values extracted from one command's source; return the paths
 /// of any cross-file enum/constant sources read (for dependency-based caching).
+// ponytail: a file defining several commands (routes/console.php) attributes
+// every comparison to every command sharing an argument/option name — extra
+// candidates, never missing ones. Per-closure scoping if it ever annoys.
 fn extract_from(src: &[u8], project_dir: &Path, out: &mut Values) -> Vec<PathBuf> {
     let arena = LocalArena::new();
     let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"cmd.php"), src);
@@ -590,6 +593,47 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
                     ctx.add_all(&r, cases.ordered_values());
                 }
             }
+            // $x = $this->option('mode') ?? $this->choice('Q', [...]) — the
+            // prompt's option list IS the value set. Also select()/multiselect()
+            // from Laravel Prompts. Only the coalesce form ties the prompt to an
+            // option/argument, so that's the form recognized.
+            Expression::Binary(b) if b.operator.is_null_coalesce() => {
+                if let Some(r) = expr_ref(b.lhs, ctx) {
+                    let vals = prompt_values(b.rhs);
+                    ctx.add_all(&r, vals);
+                }
+            }
+            // Elvis: $this->option('mode') ?: $this->choice('Q', [...]).
+            Expression::Conditional(c) if c.then.is_none() => {
+                if let Some(r) = expr_ref(c.condition, ctx) {
+                    let vals = prompt_values(c.r#else);
+                    ctx.add_all(&r, vals);
+                }
+            }
+            // Validation rules: ['mode' => 'required|in:fast,slow'] and
+            // ['mode' => ['required', Rule::in([...])]]. Field names aren't
+            // marked argument vs option, so attach to both kinds — the
+            // definition lookup only consults the kind that exists.
+            Expression::Array(_) | Expression::LegacyArray(_) => {
+                let elements = match expression {
+                    Expression::Array(a) => a.elements.as_slice(),
+                    Expression::LegacyArray(a) => a.elements.as_slice(),
+                    _ => unreachable!(),
+                };
+                for element in elements {
+                    let ArrayElement::KeyValue(kv) = element else {
+                        continue;
+                    };
+                    let Some(field) = lit_str(kv.key) else {
+                        continue;
+                    };
+                    let vals = rule_values(kv.value, ctx);
+                    if !vals.is_empty() {
+                        ctx.add_all(&(Kind::Argument, field.clone()), vals.clone());
+                        ctx.add_all(&(Kind::Option, field), vals);
+                    }
+                }
+            }
             // match ($this->argument('x')) { 'a', self::B, Enum::C->value => ... }
             Expression::Match(m) => {
                 let Some(r) = expr_ref(m.expression, ctx) else {
@@ -618,19 +662,212 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Ctx> for Extractor {
             }
             return;
         }
-        let Statement::Switch(s) = statement else {
-            return;
-        };
-        let Some(r) = expr_ref(s.expression, ctx) else {
-            return;
-        };
-        for case in s.body.cases() {
-            if let SwitchCase::Expression(c) = case {
-                let vals = lit_strings(c.expression, ctx);
+        match statement {
+            Statement::Switch(s) => {
+                let Some(r) = expr_ref(s.expression, ctx) else {
+                    return;
+                };
+                for case in s.body.cases() {
+                    if let SwitchCase::Expression(c) = case {
+                        let vals = lit_strings(c.expression, ctx);
+                        ctx.add_all(&r, vals);
+                    }
+                }
+            }
+            // Symfony complete() override:
+            //   if ($input->mustSuggestOptionValuesFor('mode')) {
+            //       $suggestions->suggestValues([...]);
+            //   }
+            // Statically links the guard's option/argument name to the
+            // suggested values, so these work without ARTISAN_COMP_NATIVE.
+            Statement::If(f) => {
+                let Some(r) = suggest_target(f.condition) else {
+                    return;
+                };
+                let mut vals = Vec::new();
+                match &f.body {
+                    IfBody::Statement(b) => {
+                        collect_suggested(b.statement, ctx, &mut vals);
+                    }
+                    IfBody::ColonDelimited(b) => {
+                        for s in b.statements.iter() {
+                            collect_suggested(s, ctx, &mut vals);
+                        }
+                    }
+                }
                 ctx.add_all(&r, vals);
             }
+            _ => {}
         }
     }
+}
+
+/// `$input->mustSuggestOptionValuesFor('x')` / `...ArgumentValuesFor('x')`
+/// (possibly parenthesized) → the ref the suggestions belong to.
+fn suggest_target(expr: &Expression) -> Option<RefKey> {
+    match expr {
+        Expression::Parenthesized(p) => suggest_target(p.expression),
+        Expression::Call(Call::Method(mc)) => {
+            let ClassLikeMemberSelector::Identifier(id) = &mc.method else {
+                return None;
+            };
+            let kind = match id.value {
+                b"mustSuggestOptionValuesFor" => Kind::Option,
+                b"mustSuggestArgumentValuesFor" => Kind::Argument,
+                _ => return None,
+            };
+            let first = mc.argument_list.arguments.iter().next()?;
+            Some((kind, lit_str_arg(first)?))
+        }
+        _ => None,
+    }
+}
+
+/// Collect `$suggestions->suggestValues([...])` / `->suggestValue('x')` from a
+/// statement (descending into a block, the usual `if { ... }` body).
+fn collect_suggested(statement: &Statement, ctx: &mut Ctx, out: &mut Vec<String>) {
+    match statement {
+        Statement::Block(b) => {
+            for s in b.statements.iter() {
+                collect_suggested(s, ctx, out);
+            }
+        }
+        Statement::Expression(es) => {
+            let Expression::Call(Call::Method(mc)) = es.expression else {
+                return;
+            };
+            let ClassLikeMemberSelector::Identifier(id) = &mc.method else {
+                return;
+            };
+            if !matches!(id.value, b"suggestValues" | b"suggestValue") {
+                return;
+            }
+            if let Some(first) = mc.argument_list.arguments.iter().next() {
+                out.extend(collect_strings(first.value(), ctx));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Values a prompt expression offers: `$this->choice('Q', [...])` (2nd arg),
+/// Laravel Prompts `select(...)`/`multiselect(...)` (`options:` named arg or
+/// 2nd positional). Assoc arrays yield their keys — that's what the prompt
+/// returns; list arrays yield their values.
+fn prompt_values(expr: &Expression) -> Vec<String> {
+    match expr {
+        Expression::Parenthesized(p) => prompt_values(p.expression),
+        Expression::Call(Call::Method(mc)) => {
+            let Expression::Variable(Variable::Direct(dv)) = mc.object else {
+                return Vec::new();
+            };
+            let ClassLikeMemberSelector::Identifier(id) = &mc.method else {
+                return Vec::new();
+            };
+            if dv.name != b"$this" || id.value != b"choice" {
+                return Vec::new();
+            }
+            mc.argument_list
+                .arguments
+                .iter()
+                .nth(1)
+                .map(|a| prompt_array_values(a.value()))
+                .unwrap_or_default()
+        }
+        Expression::Call(Call::Function(fc)) => {
+            let Expression::Identifier(id) = fc.function else {
+                return Vec::new();
+            };
+            if !matches!(id.last_segment(), b"select" | b"multiselect") {
+                return Vec::new();
+            }
+            let args: Vec<_> = fc.argument_list.arguments.iter().collect();
+            let options = args
+                .iter()
+                .find_map(|a| match a {
+                    Argument::Named(n) if n.name.value == b"options" => Some(n.value),
+                    _ => None,
+                })
+                .or_else(|| args.get(1).map(|a| a.value()));
+            options.map(prompt_array_values).unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Keys of an assoc array, values of a list array — matching what the prompt
+/// hands back to the command.
+fn prompt_array_values(expr: &Expression) -> Vec<String> {
+    let elements = match expr {
+        Expression::Parenthesized(p) => return prompt_array_values(p.expression),
+        Expression::Array(a) => a.elements.as_slice(),
+        Expression::LegacyArray(a) => a.elements.as_slice(),
+        _ => return Vec::new(),
+    };
+    elements
+        .iter()
+        .filter_map(|e| match e {
+            ArrayElement::KeyValue(kv) => lit_str(kv.key),
+            ArrayElement::Value(v) => lit_str(v.value),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Strings a validation-rule expression allows: an `in:a,b` segment of a rule
+/// string, `Rule::in([...])` / `Rule::in('a','b')`, or an array of either.
+fn rule_values(expr: &Expression, ctx: &mut Ctx) -> Vec<String> {
+    if let Some(s) = lit_str(expr) {
+        return parse_in_rule(&s);
+    }
+    match expr {
+        Expression::Parenthesized(p) => rule_values(p.expression, ctx),
+        Expression::Array(a) => a
+            .elements
+            .iter()
+            .filter_map(|e| e.get_value())
+            .flat_map(|v| rule_values(v, ctx))
+            .collect(),
+        Expression::LegacyArray(a) => a
+            .elements
+            .iter()
+            .filter_map(|e| e.get_value())
+            .flat_map(|v| rule_values(v, ctx))
+            .collect(),
+        // Rule::in([...]) / Rule::in('a', 'b') — also In::of-style enum args
+        // resolve through collect_strings (enum chains, constants).
+        Expression::Call(Call::StaticMethod(smc)) => {
+            let ClassLikeMemberSelector::Identifier(m) = &smc.method else {
+                return Vec::new();
+            };
+            let Expression::Identifier(cid) = smc.class else {
+                return Vec::new();
+            };
+            if m.value != b"in" || cid.last_segment() != b"Rule" {
+                return Vec::new();
+            }
+            smc.argument_list
+                .arguments
+                .iter()
+                .flat_map(|a| collect_strings(a.value(), ctx))
+                .collect()
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// `in:a,b,c` segment of a pipe-joined rule string → its comma-split values.
+fn parse_in_rule(rule: &str) -> Vec<String> {
+    rule.split('|')
+        .find_map(|seg| seg.strip_prefix("in:"))
+        .map(|list| {
+            list.split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Resolve an expression to an argument/option reference:
@@ -663,10 +900,17 @@ fn expr_ref(expr: &Expression, ctx: &Ctx) -> Option<RefKey> {
         // `(string) $x` / `(int) $x` — casts preserve the ref.
         Expression::UnaryPrefix(u) if u.operator.is_cast() => expr_ref(u.operand, ctx),
         // `cond ? $a : $b` — either branch may carry the ref (e.g. `... ? null : $x`).
+        // Elvis (`$x ?: $y`) has no then-branch; its value is the condition.
         Expression::Conditional(c) => c
             .then
             .and_then(|t| expr_ref(t, ctx))
-            .or_else(|| expr_ref(c.r#else, ctx)),
+            .or_else(|| expr_ref(c.r#else, ctx))
+            .or_else(|| {
+                c.then
+                    .is_none()
+                    .then(|| expr_ref(c.condition, ctx))
+                    .flatten()
+            }),
         // See through calls whose result carries the same ref as one argument:
         // scalar wrappers (`trim($x)`) and element-preserving array ops
         // (`explode(',', $x)`, `array_map($fn, $x)`, `array_filter($x)`). This
@@ -1491,6 +1735,118 @@ class Move extends Command
             out.get(&(Kind::Option, "to".to_string())),
             Some(&vec!["gitlab".to_string()]),
             "--to should get only its own value"
+        );
+    }
+
+    #[test]
+    fn extracts_validation_in_rules() {
+        // in: rule string, array-form rules, and Rule::in([...]) — attached to
+        // the field name under both kinds.
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+use Illuminate\Validation\Rule;
+
+class Deploy extends Command
+{
+    protected $signature = 'app:deploy {target} {--mode=} {--tier=}';
+
+    public function handle(): int
+    {
+        $validator = Validator::make($this->arguments() + $this->options(), [
+            'target' => 'required|in:staging,production',
+            'mode' => ['nullable', 'in:fast,safe'],
+            'tier' => ['nullable', Rule::in(['free', 'paid'])],
+        ]);
+
+        return $validator->fails() ? 1 : 0;
+    }
+}
+"#;
+        let out = extract_fixture(cmd);
+        assert_eq!(
+            out[&(Kind::Argument, "target".to_string())],
+            vec!["staging", "production"]
+        );
+        assert_eq!(
+            out[&(Kind::Option, "mode".to_string())],
+            vec!["fast", "safe"]
+        );
+        assert_eq!(
+            out[&(Kind::Option, "tier".to_string())],
+            vec!["free", "paid"]
+        );
+    }
+
+    #[test]
+    fn extracts_choice_and_select_prompts() {
+        // ?? $this->choice(...) and ?: select(...) — list arrays yield values,
+        // assoc arrays yield keys (what the prompt returns).
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+use function Laravel\Prompts\select;
+
+class Ship extends Command
+{
+    protected $signature = 'app:ship {--env=} {--region=}';
+
+    public function handle(): int
+    {
+        $env = $this->option('env') ?? $this->choice('Which env?', ['staging', 'production']);
+        $region = $this->option('region') ?: select(
+            label: 'Region?',
+            options: ['eu' => 'Europe', 'us' => 'United States'],
+        );
+
+        return 0;
+    }
+}
+"#;
+        let out = extract_fixture(cmd);
+        assert_eq!(
+            out[&(Kind::Option, "env".to_string())],
+            vec!["staging", "production"]
+        );
+        assert_eq!(out[&(Kind::Option, "region".to_string())], vec!["eu", "us"]);
+    }
+
+    #[test]
+    fn extracts_symfony_suggest_values() {
+        // complete() override: mustSuggestOptionValuesFor guard + suggestValues.
+        let cmd = r#"<?php
+
+namespace App\Console\Commands;
+
+use Illuminate\Console\Command;
+
+class Serve extends Command
+{
+    protected $signature = 'app:serve {host?} {--format=}';
+
+    public function complete(CompletionInput $input, CompletionSuggestions $suggestions): void
+    {
+        if ($input->mustSuggestOptionValuesFor('format')) {
+            $suggestions->suggestValues(['json', 'table', 'csv']);
+        }
+        if ($input->mustSuggestArgumentValuesFor('host')) {
+            $suggestions->suggestValue('localhost');
+        }
+    }
+}
+"#;
+        let out = extract_fixture(cmd);
+        assert_eq!(
+            out[&(Kind::Option, "format".to_string())],
+            vec!["json", "table", "csv"]
+        );
+        assert_eq!(
+            out[&(Kind::Argument, "host".to_string())],
+            vec!["localhost"]
         );
     }
 

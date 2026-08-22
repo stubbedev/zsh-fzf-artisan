@@ -4,9 +4,11 @@
 //!   artisan-comp complete --cwd "$PWD" --current $CURRENT -- "${words[@]}"
 //!
 //! Prints a prompt title on the first line and tab-separated
-//! "candidate<TAB>description" items on the following lines. Exits non-zero
-//! when it cannot function (no artisan, php failed with no usable cache) so
-//! the shim can fall back to its pure-zsh path.
+//! "candidate<TAB>description" items on the following lines. The title may be
+//! prefixed "MULTI\t" (fzf multi-select allowed), and the single item
+//! `__ARTISAN_FILES__` tells the shim to fall back to zsh file completion.
+//! Exits non-zero when it cannot function (no artisan, php failed with no
+//! usable cache) so the shim can show its "not ready" hint instead of hanging.
 
 mod native;
 mod values;
@@ -421,6 +423,38 @@ fn complete_args(
         }
     }
 
+    // `artisan test` forwards --filter/--group/--testsuite/... to phpunit
+    // without declaring them, so they're absent from the definition. Synthesize
+    // them so their catalog values (test names, groups, suites) are reachable
+    // and they show up in the option list.
+    const TEST_PASSTHROUGH: &[(&str, &str, &str)] = &[
+        ("--filter", "filter", "Filter which tests to run (phpunit)"),
+        (
+            "--group",
+            "group",
+            "Only run tests from the specified group(s) (phpunit)",
+        ),
+        (
+            "--exclude-group",
+            "exclude-group",
+            "Exclude tests from the specified group(s) (phpunit)",
+        ),
+        (
+            "--testsuite",
+            "testsuite",
+            "Only run tests from the specified test suite (phpunit)",
+        ),
+    ];
+    let mut synthetic_opts: Vec<(&str, &str)> = Vec::new();
+    if subcmd == "test" {
+        for &(flag, key, desc) in TEST_PASSTHROUGH {
+            if !value_opts.contains_key(flag) {
+                value_opts.insert(flag, key);
+                synthetic_opts.push((flag, desc));
+            }
+        }
+    }
+
     // Words already typed between the subcommand and the cursor.
     let prior_words: Vec<&str> = words
         .iter()
@@ -438,10 +472,26 @@ fn complete_args(
     let option_values = |key: &str| -> Vec<String> {
         let vals = combined(Kind::Option, key);
         if vals.is_empty() && native::enabled() {
-            native::complete(project, words, current)
+            native_cached(
+                project,
+                cache_dir,
+                project_hash,
+                &subcmd,
+                key,
+                words,
+                current,
+            )
         } else {
             vals
         }
+    };
+    let is_multiple = |key: &str| -> bool {
+        def.get("options")
+            .and_then(Value::as_object)
+            .and_then(|o| o.get(key))
+            .and_then(|o| o.get("is_multiple"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     };
 
     // Typing an option value inline: `--opt=<partial>` / `-m=<partial>`.
@@ -452,11 +502,17 @@ fn complete_args(
                     if let Some(&key) = value_opts.get(opt_word) {
                         let opt_vals = option_values(key);
                         if !opt_vals.is_empty() {
-                            let mut out = format!("Artisan {opt_word}\n");
+                            // Repeatable options allow multi-select: each pick
+                            // is a complete `--opt=v` token, space-joinable.
+                            let tag = if is_multiple(key) { "MULTI\t" } else { "" };
+                            let mut out = format!("{tag}Artisan {opt_word}\n");
                             for v in opt_vals {
                                 out.push_str(&format!("{opt_word}={v}\tvalue for --{key}\n"));
                             }
                             return Some(out);
+                        }
+                        if path_like(key) {
+                            return Some(format!("Artisan {opt_word}\n{FILES_DIRECTIVE}\n"));
                         }
                     }
                 }
@@ -475,6 +531,9 @@ fn complete_args(
                             out.push_str(&format!("{v}\tvalue for --{key}\n"));
                         }
                         return Some(out);
+                    }
+                    if path_like(key) {
+                        return Some(format!("Artisan --{key}\n{FILES_DIRECTIVE}\n"));
                     }
                 }
             }
@@ -559,8 +618,60 @@ fn complete_args(
             }
         }
     }
+    if !in_positional_only {
+        for (flag, desc) in &synthetic_opts {
+            if !option_used(&prior_words, flag, "") {
+                out.push_str(&format!("{flag}=\t{desc}\n"));
+            }
+        }
+    }
 
     Some(out)
+}
+
+/// Sentinel item telling the zsh shim to complete file paths instead —
+/// emitted for path-shaped option keys when no static/native values exist.
+const FILES_DIRECTIVE: &str = "__ARTISAN_FILES__";
+
+/// Option keys whose values are file paths (a tab on them without candidates
+/// should offer files, not nothing).
+fn path_like(key: &str) -> bool {
+    key.split(['-', '_'])
+        .any(|s| matches!(s, "path" | "paths" | "file" | "files" | "dir" | "directory"))
+}
+
+/// Native `_complete` results cached for NATIVE_TTL per (project, command,
+/// option), so repeated tabs on a runtime-only value don't boot Laravel on
+/// every press. Empty results are cached too — a value-less option shouldn't
+/// re-boot each tab either.
+const NATIVE_TTL: Duration = Duration::from_secs(60);
+
+#[allow(clippy::too_many_arguments)]
+fn native_cached(
+    project: &Project,
+    cache_dir: &Path,
+    project_hash: &str,
+    subcmd: &str,
+    key: &str,
+    words: &[String],
+    current: usize,
+) -> Vec<String> {
+    let file = cache_dir.join(format!(
+        "{project_hash}_{}.native",
+        fnv_hex(format!("{subcmd}\0{key}").as_bytes())
+    ));
+    if mtime(&file).is_some_and(|t| t.elapsed().is_ok_and(|e| e < NATIVE_TTL)) {
+        if let Ok(text) = fs::read_to_string(&file) {
+            return text
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+    }
+    let vals = native::complete(project, words, current);
+    write_atomic(&file, vals.join("\n").as_bytes());
+    vals
 }
 
 fn hints(v: &Value) -> String {
@@ -732,8 +843,14 @@ fn newest_catalog_source(project: &Project) -> Option<SystemTime> {
             "database/seeders",
             "app/Models",
             "app/Providers",
+            "app/Events",
+            "routes",
         ] {
             bump(&mut newest, newest_php_in(&project.dir.join(rel)));
+        }
+        // phpunit.xml drives the testsuite catalog and isn't a .php file.
+        for f in ["phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"] {
+            bump(&mut newest, mtime(&project.dir.join(f)));
         }
         // .env.* files live in the project root.
         if let Ok(entries) = fs::read_dir(&project.dir) {

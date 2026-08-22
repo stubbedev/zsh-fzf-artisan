@@ -13,10 +13,12 @@ use std::path::Path;
 use mago_allocator::LocalArena;
 use mago_database::file::FileId;
 use mago_span::HasSpan;
-use mago_syntax::cst::cst::{ArrayElement, Expression, NamespaceBody, Statement};
+use mago_syntax::cst::cst::{
+    ArrayElement, AttributeList, Call, Expression, NamespaceBody, PartialArgument, Statement,
+};
 use mago_syntax::walker::{walk_program, Walker};
 
-use crate::values::{lit_str, Kind};
+use crate::values::{find_sub, lit_str, Kind};
 
 const HTTP_METHODS: &[&str] = &["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"];
 
@@ -39,10 +41,17 @@ pub struct Catalog {
     tests: Vec<String>,
     migrations: Vec<String>,
     envs: Vec<String>,
+    events: Vec<String>,
+    tables: Vec<String>,
+    suites: Vec<String>,
+    groups: Vec<String>,
+    route_names: Vec<String>,
+    queues: Vec<String>,
 }
 
 impl Catalog {
     pub fn build(project_dir: &Path) -> Self {
+        let (tests, groups) = test_names_and_groups(&project_dir.join("tests"));
         Catalog {
             models: class_stems(&project_dir.join("app/Models")),
             seeders: class_stems(&project_dir.join("database/seeders")),
@@ -53,9 +62,15 @@ impl Catalog {
             stores: config_keys(project_dir, "config/cache.php", "stores"),
             disks: config_keys(project_dir, "config/filesystems.php", "disks"),
             guards: config_keys(project_dir, "config/auth.php", "guards"),
-            tests: test_names(&project_dir.join("tests")),
+            tests,
             migrations: migration_paths(&project_dir.join("database/migrations")),
             envs: env_names(project_dir),
+            events: class_stems(&project_dir.join("app/Events")),
+            tables: table_names(&project_dir.join("database/migrations")),
+            suites: testsuite_names(project_dir),
+            groups,
+            route_names: route_names(&project_dir.join("routes")),
+            queues: queue_names(project_dir),
         }
     }
 
@@ -77,6 +92,12 @@ impl Catalog {
                 HTTP_METHODS.iter().map(|s| s.to_string()).collect()
             }
             "env" => self.envs.clone(),
+            "event" if subcmd == "make:listener" => self.events.clone(),
+            "table" => self.tables.clone(),
+            "testsuite" => self.suites.clone(),
+            "group" | "exclude-group" if subcmd == "test" => self.groups.clone(),
+            "name" if subcmd == "route:list" => self.route_names.clone(),
+            "queue" => self.queues.clone(),
             _ => Vec::new(),
         }
     }
@@ -109,6 +130,12 @@ impl Catalog {
         section("test", &self.tests);
         section("migration", &self.migrations);
         section("env", &self.envs);
+        section("event", &self.events);
+        section("table", &self.tables);
+        section("suite", &self.suites);
+        section("group", &self.groups);
+        section("route", &self.route_names);
+        section("queue", &self.queues);
         out
     }
 
@@ -131,6 +158,12 @@ impl Catalog {
                 "test" => &mut c.tests,
                 "migration" => &mut c.migrations,
                 "env" => &mut c.envs,
+                "event" => &mut c.events,
+                "table" => &mut c.tables,
+                "suite" => &mut c.suites,
+                "group" => &mut c.groups,
+                "route" => &mut c.route_names,
+                "queue" => &mut c.queues,
                 _ => continue,
             };
             bucket.push(value.to_string());
@@ -351,23 +384,181 @@ fn env_names(project_dir: &Path) -> Vec<String> {
     out
 }
 
-// --- tests -----------------------------------------------------------------
+// --- tables / testsuites / routes / queues -----------------------------------
 
-/// Test identifiers for `test --filter`: class basenames, PHPUnit test methods
-/// (name `test*`, `#[Test]` attribute, or `@test` docblock), and Pest
-/// `it()`/`test()` descriptions.
-fn test_names(dir: &Path) -> Vec<String> {
-    let mut out: BTreeSet<String> = BTreeSet::new();
+/// After every occurrence of `needle`, capture the immediately following
+/// single- or double-quoted literal. Byte scan — no parse, runs only inside the
+/// cached catalog build.
+fn scan_quoted_calls(src: &[u8], needle: &[u8], out: &mut BTreeSet<String>) {
+    let mut from = 0;
+    while let Some(pos) = find_sub(&src[from..], needle) {
+        let mut i = from + pos + needle.len();
+        while src.get(i).is_some_and(|b| b.is_ascii_whitespace()) {
+            i += 1;
+        }
+        if let Some(&q @ (b'\'' | b'"')) = src.get(i) {
+            let start = i + 1;
+            if let Some(len) = find_sub(&src[start..], &[q]) {
+                if let Ok(s) = std::str::from_utf8(&src[start..start + len]) {
+                    if !s.is_empty() {
+                        out.insert(s.to_string());
+                    }
+                }
+            }
+        }
+        from = from + pos + needle.len();
+    }
+}
+
+/// Table names from `Schema::create('x')` in migrations → `db:table`,
+/// `make:migration --table=`.
+fn table_names(dir: &Path) -> Vec<String> {
+    let mut out = BTreeSet::new();
     for_each_php(dir, &mut |path| {
         if let Ok(src) = fs::read(path) {
-            scan_tests(&src, &mut out);
+            scan_quoted_calls(&src, b"Schema::create(", &mut out);
         }
     });
     out.into_iter().collect()
 }
 
+/// Route names from `->name('x')` / `Route::name('x')` in routes/ →
+/// `route:list --name=`. Group name prefixes (trailing dot) are dropped;
+/// names inside prefixed groups come out unprefixed — partial beats booting.
+fn route_names(dir: &Path) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for_each_php(dir, &mut |path| {
+        // routes/console.php names scheduled tasks, not routes.
+        if path.file_name().is_some_and(|n| n == "console.php") {
+            return;
+        }
+        if let Ok(src) = fs::read(path) {
+            scan_quoted_calls(&src, b"->name(", &mut out);
+            scan_quoted_calls(&src, b"::name(", &mut out);
+        }
+    });
+    out.into_iter().filter(|n| !n.ends_with('.')).collect()
+}
+
+/// `<testsuite name="...">` entries from phpunit.xml(.dist) → `test --testsuite=`.
+fn testsuite_names(project_dir: &Path) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for f in ["phpunit.xml", "phpunit.xml.dist", "phpunit.dist.xml"] {
+        let Ok(src) = fs::read(project_dir.join(f)) else {
+            continue;
+        };
+        let mut from = 0;
+        while let Some(pos) = find_sub(&src[from..], b"<testsuite ") {
+            let at = from + pos;
+            let end = find_sub(&src[at..], b">").map_or(src.len(), |e| at + e);
+            let tag = &src[at..end];
+            if let Some(np) = find_sub(tag, b"name=\"") {
+                let start = np + 6;
+                if let Some(len) = find_sub(&tag[start..], b"\"") {
+                    if let Ok(s) = std::str::from_utf8(&tag[start..start + len]) {
+                        if !s.is_empty() {
+                            out.insert(s.to_string());
+                        }
+                    }
+                }
+            }
+            from = at + 1;
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Queue names from config/queue.php: each connection's `queue` key, unwrapping
+/// `env('X', 'default')` to the default → `--queue=`.
+fn queue_names(project_dir: &Path) -> Vec<String> {
+    let Ok(src) = fs::read(project_dir.join("config/queue.php")) else {
+        return Vec::new();
+    };
+    let arena = LocalArena::new();
+    let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"q.php"), &src);
+    let mut out = BTreeSet::new();
+    for stmt in program.statements.as_slice() {
+        let Statement::Return(ret) = stmt else {
+            continue;
+        };
+        let Some(value) = ret.value else { continue };
+        let Some(elements) = array_elements(unparen(value)) else {
+            continue;
+        };
+        for element in elements {
+            let ArrayElement::KeyValue(kv) = element else {
+                continue;
+            };
+            if lit_str(kv.key).as_deref() != Some("connections") {
+                continue;
+            }
+            let Some(conns) = array_elements(unparen(kv.value)) else {
+                continue;
+            };
+            for conn in conns {
+                let ArrayElement::KeyValue(c) = conn else {
+                    continue;
+                };
+                let Some(fields) = array_elements(unparen(c.value)) else {
+                    continue;
+                };
+                for field in fields {
+                    let ArrayElement::KeyValue(fkv) = field else {
+                        continue;
+                    };
+                    if lit_str(fkv.key).as_deref() == Some("queue") {
+                        if let Some(q) = scalar_or_env_default(unparen(fkv.value)) {
+                            out.insert(q);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// A string literal, or the default argument of `env('X', 'default')`.
+fn scalar_or_env_default(expr: &Expression) -> Option<String> {
+    if let Some(s) = lit_str(expr) {
+        return Some(s);
+    }
+    let Expression::Call(Call::Function(fc)) = expr else {
+        return None;
+    };
+    let Expression::Identifier(id) = fc.function else {
+        return None;
+    };
+    if !id.last_segment().eq_ignore_ascii_case(b"env") {
+        return None;
+    }
+    fc.argument_list
+        .arguments
+        .iter()
+        .nth(1)
+        .and_then(|a| lit_str(a.value()))
+}
+
+// --- tests -----------------------------------------------------------------
+
+/// Test identifiers for `test --filter` (class basenames, PHPUnit test methods
+/// — name `test*`, `#[Test]` attribute, or `@test` docblock — and Pest
+/// `it()`/`test()` descriptions), plus group names for `test --group` from
+/// `#[Group('x')]` attributes and `@group x` docblocks.
+fn test_names_and_groups(dir: &Path) -> (Vec<String>, Vec<String>) {
+    let mut tests: BTreeSet<String> = BTreeSet::new();
+    let mut groups: BTreeSet<String> = BTreeSet::new();
+    for_each_php(dir, &mut |path| {
+        if let Ok(src) = fs::read(path) {
+            scan_tests(&src, &mut tests, &mut groups);
+        }
+    });
+    (tests.into_iter().collect(), groups.into_iter().collect())
+}
+
 struct TestCtx {
     names: BTreeSet<String>,
+    groups: BTreeSet<String>,
     /// `(end_offset, is_test_docblock)` for every docblock, sorted by end.
     docblocks: Vec<(u32, bool)>,
     /// End offset of the previously visited method, so a docblock is only
@@ -375,25 +566,83 @@ struct TestCtx {
     prev_method_end: u32,
 }
 
-fn scan_tests(src: &[u8], out: &mut BTreeSet<String>) {
+fn scan_tests(src: &[u8], out: &mut BTreeSet<String>, groups: &mut BTreeSet<String>) {
     let arena = LocalArena::new();
     let program = mago_syntax::parser::parse_file_content(&arena, FileId::new(b"t.php"), src);
 
-    let mut docblocks: Vec<(u32, bool)> = program
-        .trivia
-        .iter()
-        .filter(|t| t.kind.is_comment())
-        .map(|t| (t.span.end.offset, contains_test_tag(t.value)))
-        .collect();
+    let mut docblocks: Vec<(u32, bool)> = Vec::new();
+    for t in program.trivia.iter().filter(|t| t.kind.is_comment()) {
+        docblocks.push((t.span.end.offset, contains_test_tag(t.value)));
+        collect_group_tags(t.value, groups);
+    }
     docblocks.sort_by_key(|(end, _)| *end);
 
     let mut ctx = TestCtx {
         names: std::mem::take(out),
+        groups: std::mem::take(groups),
         docblocks,
         prev_method_end: 0,
     };
     walk_program(&TestScan, program, &mut ctx);
     *out = ctx.names;
+    *groups = ctx.groups;
+}
+
+/// `@group name` tags in a docblock — group names are project-global, so no
+/// attribution to a specific method is needed.
+fn collect_group_tags(bytes: &[u8], out: &mut BTreeSet<String>) {
+    let mut from = 0;
+    while let Some(pos) = find_sub(&bytes[from..], b"@group") {
+        let mut i = from + pos + 6;
+        let had_space = bytes.get(i).is_some_and(|b| b.is_ascii_whitespace());
+        while bytes.get(i).is_some_and(|b| *b == b' ' || *b == b'\t') {
+            i += 1;
+        }
+        let start = i;
+        while bytes
+            .get(i)
+            .is_some_and(|b| !b.is_ascii_whitespace() && *b != b'*' && *b != b'}')
+        {
+            i += 1;
+        }
+        if had_space && i > start {
+            if let Ok(s) = std::str::from_utf8(&bytes[start..i]) {
+                out.insert(s.to_string());
+            }
+        }
+        from = from + pos + 6;
+    }
+}
+
+/// `#[Group('x')]` attribute values (PHPUnit\Framework\Attributes\Group).
+fn collect_group_attrs<'a, 'b>(
+    lists: impl Iterator<Item = &'a AttributeList<'b>>,
+    out: &mut BTreeSet<String>,
+) where
+    'b: 'a,
+{
+    for list in lists {
+        for attr in list.attributes.iter() {
+            if !attr.name.last_segment().eq_ignore_ascii_case(b"group") {
+                continue;
+            }
+            let Some(args) = &attr.argument_list else {
+                continue;
+            };
+            for arg in args.arguments.iter() {
+                let expr = match arg {
+                    PartialArgument::Positional(p) => p.value,
+                    PartialArgument::Named(n) => n.value,
+                    _ => continue,
+                };
+                if let Some(s) = lit_str(expr) {
+                    if !s.is_empty() {
+                        out.insert(s);
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// `@test` as a whole docblock tag (not a substring of a longer word).
@@ -417,6 +666,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, TestCtx> for TestScan {
     fn walk_in_class(&self, class: &'ast mago_syntax::cst::cst::Class<'arena>, ctx: &mut TestCtx) {
         ctx.names
             .insert(String::from_utf8_lossy(class.name.value).into_owned());
+        collect_group_attrs(class.attribute_lists.iter(), &mut ctx.groups);
     }
 
     fn walk_in_method(
@@ -424,6 +674,7 @@ impl<'ast, 'arena> Walker<'ast, 'arena, TestCtx> for TestScan {
         method: &'ast mago_syntax::cst::cst::Method<'arena>,
         ctx: &mut TestCtx,
     ) {
+        collect_group_attrs(method.attribute_lists.iter(), &mut ctx.groups);
         let name = String::from_utf8_lossy(method.name.value);
         let span = method.span();
         let is_test = (name.starts_with("test") && name.len() > 4)
@@ -561,6 +812,7 @@ return [
     #[test]
     fn detects_test_attribute_and_docblock() {
         let mut out = BTreeSet::new();
+        let mut groups = BTreeSet::new();
         scan_tests(
             br#"<?php
 class ThingTest extends TestCase
@@ -583,6 +835,7 @@ class ThingTest extends TestCase
 }
 "#,
             &mut out,
+            &mut groups,
         );
         for t in [
             "testClassic",
@@ -649,6 +902,122 @@ test('subtracts numbers', function () {});
             .values("route:list", &Kind::Option, "method")
             .iter()
             .any(|s| s == "GET"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_tables_suites_groups_routes_queues_events() {
+        let dir =
+            std::env::temp_dir().join(format!("artisan-comp-wk3-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("database/migrations")).unwrap();
+        fs::create_dir_all(dir.join("routes")).unwrap();
+        fs::create_dir_all(dir.join("tests")).unwrap();
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::create_dir_all(dir.join("app/Events")).unwrap();
+
+        fs::write(
+            dir.join("database/migrations/2024_01_01_000000_create_users_table.php"),
+            r#"<?php
+Schema::create('users', function (Blueprint $table) {});
+Schema::create("orders", function (Blueprint $table) {});
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("routes/web.php"),
+            r#"<?php
+Route::get('/', HomeController::class)->name('home');
+Route::name('admin.')->group(function () {
+    Route::get('/admin', AdminController::class)->name('dashboard');
+});
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("phpunit.xml"),
+            r#"<phpunit>
+  <testsuites>
+    <testsuite name="Unit"><directory>tests/Unit</directory></testsuite>
+    <testsuite name="Feature"><directory>tests/Feature</directory></testsuite>
+  </testsuites>
+</phpunit>
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("tests/GroupTest.php"),
+            r#"<?php
+use PHPUnit\Framework\Attributes\Group;
+
+#[Group('slow')]
+class GroupTest extends TestCase
+{
+    #[Group('integration')]
+    public function testOne() {}
+
+    /** @group legacy */
+    public function testTwo() {}
+}
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("config/queue.php"),
+            r#"<?php
+return [
+    'connections' => [
+        'redis' => ['driver' => 'redis', 'queue' => env('REDIS_QUEUE', 'default')],
+        'database' => ['driver' => 'database', 'queue' => 'jobs'],
+    ],
+];
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app/Events/UserRegistered.php"),
+            "<?php class UserRegistered {}",
+        )
+        .unwrap();
+
+        let cat = Catalog::build(&dir);
+        assert_eq!(
+            cat.values("db:table", &Kind::Argument, "table"),
+            vec!["orders", "users"]
+        );
+        assert_eq!(
+            cat.values("test", &Kind::Option, "testsuite"),
+            vec!["Feature", "Unit"]
+        );
+        assert_eq!(
+            cat.values("test", &Kind::Option, "group"),
+            vec!["integration", "legacy", "slow"]
+        );
+        // Group prefix 'admin.' dropped; names inside groups still surface.
+        assert_eq!(
+            cat.values("route:list", &Kind::Option, "name"),
+            vec!["dashboard", "home"]
+        );
+        assert_eq!(
+            cat.values("queue:work", &Kind::Option, "queue"),
+            vec!["default", "jobs"]
+        );
+        assert_eq!(
+            cat.values("make:listener", &Kind::Option, "event"),
+            vec!["UserRegistered"]
+        );
+
+        // Round-trips through the on-disk TSV.
+        let restored = Catalog::from_tsv(&cat.to_tsv());
+        assert_eq!(
+            restored.values("test", &Kind::Option, "group"),
+            vec!["integration", "legacy", "slow"]
+        );
+        assert_eq!(
+            restored.values("queue:work", &Kind::Option, "queue"),
+            vec!["default", "jobs"]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

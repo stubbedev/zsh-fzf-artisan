@@ -29,13 +29,21 @@ Without fzf the same candidates come through native zsh completion, filtered by 
 
 - Type `artisan` instead of `php artisan`, from any subdirectory of your project
 - Press `Tab` to complete commands, arguments, and options
-- Completes **argument and option values** by parsing your command's PHP source: values your code compares against `$this->argument()`/`$this->option()` (`===`, `in_array`, `match`, `switch`) become completion candidates — resolved through variable aliases, class constants, and backed enums
+- Completes **argument and option values** by parsing your command's PHP source. Candidates come from:
+  - values your code compares against `$this->argument()`/`$this->option()` (`===`, `in_array`, `match`, `switch`) — resolved through variable aliases, class constants, and backed enums
+  - validation rules: `'mode' => 'required|in:fast,slow'` and `Rule::in([...])`
+  - prompt fallbacks: `$this->option('env') ?? $this->choice('Which?', [...])` and Laravel Prompts `select()`/`multiselect()`
+  - Symfony `complete()` overrides: `mustSuggestOptionValuesFor()` + `suggestValues([...])`
 - Completes well-known Laravel values by argument/option name, all parsed statically from your project:
-  - model classes (`--model=`), seeder classes (`db:seed --class=`), service providers (`vendor:publish --provider=`)
+  - model classes (`--model=`), seeder classes (`db:seed --class=`), service providers (`vendor:publish --provider=`), event classes (`make:listener --event=`)
   - config keys, dotted (`config:show app.name`) and connection/store/disk/guard names
-  - test names for `test --filter=` (PHPUnit classes, `test*`/`#[Test]`/`@test` methods, and Pest descriptions)
-  - migration file paths (`migrate --path=`), HTTP methods (`route:list --method=`), environments (`--env=`)
-- Optional: bridges to Laravel's own `_complete` for runtime-only values (route names, queue names, publish tags) when you opt in — see `ARTISAN_COMP_NATIVE` below
+  - test names for `test --filter=` (PHPUnit classes, `test*`/`#[Test]`/`@test` methods, and Pest descriptions), suites for `test --testsuite=` (phpunit.xml), groups for `test --group=` (`#[Group]`/`@group`)
+  - migration file paths (`migrate --path=`), table names from `Schema::create()` (`db:table`, `make:migration --table=`)
+  - route names (`route:list --name=`), queue names from config/queue.php (`--queue=`)
+  - HTTP methods (`route:list --method=`), environments (`--env=`)
+- Path-shaped options with no known values (`--path=`, `--file=`) fall back to zsh file completion instead of a dead tab
+- Repeatable options (`migrate --path=`) allow fzf multi-select — pick several with `Tab`, accept with `Enter`
+- Optional: bridges to Laravel's own `_complete` for runtime-only values (publish tags, option `suggestedValues`) when you opt in — see `ARTISAN_COMP_NATIVE` below
 - With fzf: fuzzy picker with descriptions
 - Without fzf: native zsh completion filtered by prefix
 - Automatically opens files created by `artisan make:` in your editor (optional)
@@ -138,32 +146,52 @@ export ARTISAN_OPEN_ON_MAKE_EDITOR="nvim"    # Neovim
 export ARTISAN_OPEN_ON_MAKE_EDITOR="phpstorm" # PhpStorm
 ```
 
+### Custom fzf flags
+
+Set `ARTISAN_FZF_OPTS` to pass extra flags to the fzf picker (they override the defaults):
+
+```sh
+# ~/.zshrc
+export ARTISAN_FZF_OPTS="--height=60% --preview-window=down:3:wrap"
+```
+
+### Completing an alias
+
+If you alias artisan (e.g. `alias a=artisan`), register the completer for the alias too:
+
+```sh
+# ~/.zshrc (after the plugin loads)
+compdef _artisan a
+```
+
 ### Runtime value completion (opt-in)
 
-Route names, queue names, publish tags, and option `suggestedValues` only exist once Laravel boots — no static parse can know them. Set `ARTISAN_COMP_NATIVE=1` to let the completer fall back to Laravel's built-in `_complete` for these:
+Publish tags, option `suggestedValues`, and other values that only exist once Laravel boots can't always be parsed statically. Set `ARTISAN_COMP_NATIVE=1` to let the completer fall back to Laravel's built-in `_complete` for these:
 
 ```sh
 # ~/.zshrc
 export ARTISAN_COMP_NATIVE=1
 ```
 
-It is consulted **only** when the static sources find nothing for the value you're completing, so it costs an artisan boot (~200-400ms) on those tabs and nothing on the rest. Off by default.
+It is consulted **only** when the static sources find nothing for the value you're completing, so it costs an artisan boot (~200-400ms) on those tabs and nothing on the rest — and results are cached for 60 seconds, so repeated tabs on the same value don't re-boot. Off by default.
 
 ## How it works
 
-`artisan.plugin.zsh` ensures the `artisan-comp` binary exists — downloading the release build matching this checkout's version (from `Cargo.toml`) into `bin/` in the background — and delegates completion requests to it. `git pull` upgrades both together; nothing to configure. Binaries are built in CI for every platform on tag push (`.github/workflows/release.yml`); the plugin never compiles anything on your machine.
+`artisan.plugin.zsh` ensures the `artisan-comp` binary exists — downloading the newest published release into `~/.cache/artisan/bin` in the background (see Releasing below for how the version is resolved) — and delegates completion requests to it. Nothing to configure. Binaries are built in CI for every platform on tag push (`.github/workflows/release.yml`); the plugin never compiles anything on your machine.
 
 The binary:
 
 - Finds `artisan` by walking up the directory tree — no need to be in the project root
 - Boots php exactly once per cache refresh: a single `artisan list --format=json` carries every command's full definition. Everything derived from your project is cached in `~/.cache/artisan` — the command list, per-command argument values extracted from your sources, and a project-wide catalog of well-known values (config keys, test names, migrations, models, …). A cached tab press takes ~1ms and never parses or boots anything
-- Two independent invalidation signals so edits only rebuild what they affect: command-definition sources (Console dirs, `composer.lock`, `routes/console.php`, `bootstrap/app.php`) refresh the list/value caches; catalog sources (`config/`, `tests/`, `database/`, `app/Models`, `app/Providers`, `.env.*`) refresh the catalog. Editing a test never triggers an artisan re-list
+- Two independent invalidation signals so edits only rebuild what they affect: command-definition sources (Console dirs, `composer.lock`, `routes/console.php`, `bootstrap/app.php`) refresh the list/value caches; catalog sources (`config/`, `tests/`, `database/`, `app/Models`, `app/Providers`, `app/Events`, `routes/`, `phpunit.xml`, `.env.*`) refresh the catalog. Editing a test never triggers an artisan re-list
 - Completes position-aware: already-supplied positional arguments and already-typed options drop out of the suggestions
 - Invalidates caches when `artisan`, `composer.lock`, or command sources change (`app/Console/Commands/`, `app/Modules/**/Console/`, `app/Console/Kernel.php`, `routes/console.php`, `bootstrap/app.php`)
 - Discovers commands in `app/Console/Commands/`, `app/Modules/**/Console/`, `app/Console/Kernel.php`, and `routes/console.php`
-- Parses your command sources with [mago](https://github.com/carthage-software/mago)'s PHP parser to extract valid values from comparisons (`===`/`!==`), `in_array()` (negated too), `match`, and `switch` — resolving variable aliases, same-file class constants, and backed enums (`Enum::Case->value`, `Enum::from()`/`tryFrom()`, `Enum::cases()`)
-- Falls back to well-known sources by argument/option name and command: `model` → `app/Models`, `db:seed --class` → `database/seeders`, `vendor:publish --provider` → `app/Providers`, `connection`/`database`/`store`/`disk`/`guard` → config keys, `config:show` → dotted config keys, `test --filter` → test names, `migrate --path` → migration files, `route:list --method` → HTTP verbs, `--env` → `.env.*`
-- Optionally bridges to Laravel's `_complete` for runtime-only values when `ARTISAN_COMP_NATIVE=1`, consulted only when static sources come up empty
+- Parses your command sources with [mago](https://github.com/carthage-software/mago)'s PHP parser to extract valid values from comparisons (`===`/`!==`), `in_array()` (negated too), `match`, and `switch` — resolving variable aliases, same-file class constants, and backed enums (`Enum::Case->value`, `Enum::from()`/`tryFrom()`, `Enum::cases()`) — plus validation rules (`in:a,b`, `Rule::in`), prompt fallbacks (`?? $this->choice(...)`, `?: select(...)`), and Symfony `complete()` overrides (`suggestValues`)
+- Falls back to well-known sources by argument/option name and command: `model` → `app/Models`, `db:seed --class` → `database/seeders`, `vendor:publish --provider` → `app/Providers`, `make:listener --event` → `app/Events`, `connection`/`database`/`store`/`disk`/`guard` → config keys, `config:show` → dotted config keys, `test --filter`/`--group`/`--testsuite` → test names/groups/suites, `migrate --path` → migration files, `table` → `Schema::create()` names, `route:list --name`/`--method` → route names/HTTP verbs, `--queue` → config/queue.php, `--env` → `.env.*`
+- Synthesizes `test`'s phpunit passthrough options (`--filter`, `--group`, `--exclude-group`, `--testsuite`) that Laravel forwards without declaring
+- Offers zsh file completion for path-shaped options with no known values, and fzf multi-select for repeatable options
+- Optionally bridges to Laravel's `_complete` for runtime-only values when `ARTISAN_COMP_NATIVE=1`, consulted only when static sources come up empty (results cached for 60s)
 
 ## Releasing (maintainers)
 

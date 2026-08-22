@@ -303,11 +303,21 @@ function artisan() {
 
 # Present tab-separated "name\tdescription" items as completions.
 # With fzf: opens fuzzy picker. Without fzf: falls back to zsh _describe.
+# $4 = 1 allows multi-select (repeatable options — each pick a full token).
 function _artisan_complete() {
-  local prompt="$1" query="$2" items="$3"
+  local prompt="$1" query="$2" items="$3" multi="${4:-0}"
   [[ -z "$items" ]] && return
 
   if _artisan_fzf_available; then
+    # With multi-select tab must keep its native toggle role; enter accepts.
+    local -a flags
+    if [[ "$multi" == 1 ]]; then
+      flags=(--multi)
+    else
+      flags=(--bind='tab:accept')
+    fi
+    # ARTISAN_FZF_OPTS: user-supplied fzf flags, split shell-style; later
+    # flags win in fzf, so these override the defaults above.
     local selected
     selected=$(fzf \
       --preview 'echo {2..}' \
@@ -317,16 +327,23 @@ function _artisan_complete() {
       --prompt="$prompt > " \
       --delimiter=$'\t' \
       --with-nth=1 \
-      --bind='tab:accept' \
+      "${flags[@]}" \
+      ${(z)ARTISAN_FZF_OPTS} \
       --query="$query" \
       <<< "$items")
-    selected=${selected%%$'\t'*}
     if [[ -n "$selected" ]]; then
-      # Suppress the auto-added space for options that take a value (end with =).
-      if [[ "$selected" == *= ]]; then
-        compadd -S '' -U -- "$selected"
+      local -a sels
+      sels=("${(@f)selected}")
+      sels=("${sels[@]%%$'\t'*}")
+      if (( ${#sels} > 1 )); then
+        # Multiple picks: insert them space-joined, unquoted (-Q) — each is
+        # already a complete token like `--path=x`.
+        compadd -Q -U -- "${(j: :)sels}"
+      elif [[ "$sels[1]" == *= ]]; then
+        # Suppress the auto-added space for options that take a value (end with =).
+        compadd -S '' -U -- "$sels[1]"
       else
-        compadd -U -- "$selected"
+        compadd -U -- "$sels[1]"
       fi
     fi
   else
@@ -363,30 +380,67 @@ function _artisan() {
   local out
   if ! out=$("$_ARTISAN_COMP_BIN" complete --cwd "$PWD" --current "$CURRENT" -- "${words[@]}" 2>/dev/null); then
     # Most common cause when the binary is present but fails: no php on PATH.
-    if [[ -z "$_ARTISAN_PHP_BIN" ]] && (( ! ${+_ARTISAN_PHP_HINTED} )); then
-      typeset -g _ARTISAN_PHP_HINTED=1
-      (( $+functions[_message] )) && _message "artisan completions: php not found in PATH"
+    # php may have been installed after plugin load — re-resolve and retry once.
+    if [[ -z "$_ARTISAN_PHP_BIN" ]]; then
+      _ARTISAN_PHP_BIN="$(command -v php 2>/dev/null)"
+      export _ARTISAN_PHP_BIN
+      [[ -n "$_ARTISAN_PHP_BIN" ]] && \
+        out=$("$_ARTISAN_COMP_BIN" complete --cwd "$PWD" --current "$CURRENT" -- "${words[@]}" 2>/dev/null)
     fi
-    return 1
+    if [[ -z "$out" ]]; then
+      if [[ -z "$_ARTISAN_PHP_BIN" ]] && (( ! ${+_ARTISAN_PHP_HINTED} )); then
+        typeset -g _ARTISAN_PHP_HINTED=1
+        (( $+functions[_message] )) && _message "artisan completions: php not found in PATH"
+      fi
+      return 1
+    fi
   fi
 
-  # First line is the prompt title, the rest are "candidate\tdescription" items.
+  # First line is the prompt title (optionally prefixed "MULTI\t"), the rest
+  # are "candidate\tdescription" items.
   local prompt="${out%%$'\n'*}"
   local items="${out#*$'\n'}"
   [[ -z "$out" || -z "$items" || "$items" == "$out" ]] && return 0
+
+  local multi=0
+  if [[ "$prompt" == MULTI$'\t'* ]]; then
+    multi=1
+    prompt="${prompt#MULTI$'\t'}"
+  fi
+
+  # File-path fallback: the engine found a path-shaped option with no known
+  # values — complete files. compset strips an inline `--opt=` prefix first.
+  if [[ "$items" == "__ARTISAN_FILES__"* ]]; then
+    compset -P '*='
+    _files
+    return
+  fi
 
   local last_word=$words[-1]
   if (( CURRENT == 2 )); then
     [[ $last_word = "artisan" || -z $last_word ]] && last_word=$words[-2]
     [[ $last_word = "artisan" ]] && last_word=""
   fi
-  _artisan_complete "$prompt" "$last_word" "$items"
+  _artisan_complete "$prompt" "$last_word" "$items" "$multi"
 }
 
 compdef _artisan artisan
 
 # ./artisan — zsh strips path prefix for basename lookup, but register explicitly as fallback.
 compdef _artisan './artisan'
+
+# Retain whatever completer php/sail already had, so non-artisan uses
+# (`php script.php`, `sail up`) keep their original completions instead of
+# being demoted to plain file completion.
+typeset -gA _ARTISAN_PREV_COMPS
+() {
+  local c
+  for c in php sail; do
+    if [[ -n "${_comps[$c]:-}" && "${_comps[$c]}" != _artisan_php_wrapper ]]; then
+      _ARTISAN_PREV_COMPS[$c]="${_comps[$c]}"
+    fi
+  done
+}
 
 # `php artisan ...` — find artisan in the word list and delegate.
 function _artisan_php_wrapper() {
@@ -407,7 +461,13 @@ function _artisan_php_wrapper() {
     return
   fi
 
-  _default
+  # Not an artisan invocation — hand back to the displaced completer.
+  local prev="${_ARTISAN_PREV_COMPS[$service]:-}"
+  if [[ -n "$prev" ]]; then
+    "$prev"
+  else
+    _default
+  fi
 }
 compdef _artisan_php_wrapper php
 
