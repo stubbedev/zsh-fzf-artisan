@@ -6,6 +6,8 @@ on:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
 
 jobs:
   test:
@@ -64,6 +66,11 @@ jobs:
           else
             shasum -a 256 "$asset" > "$asset.sha256"
           fi
+      # Signed build provenance: verify a downloaded binary with
+      #   gh attestation verify artisan-comp-<target> --repo <this repo>
+      - uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: artisan-comp-${{ matrix.target }}
       - uses: softprops/action-gh-release@v3
         with:
           files: |

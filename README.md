@@ -46,6 +46,8 @@ Without fzf the same candidates come through native zsh completion, filtered by 
 - Optional: bridges to Laravel's own `_complete` for runtime-only values (publish tags, option `suggestedValues`) when you opt in — see `ARTISAN_COMP_NATIVE` below
 - With fzf: fuzzy picker with descriptions
 - Without fzf: native zsh completion filtered by prefix
+- Also completes `php artisan ...`, `sail artisan ...`, and `herd php artisan ...` — non-artisan uses keep their original completions
+- Fish shim included (`artisan.fish`) — same engine, fish's own pager
 - Automatically opens files created by `artisan make:` in your editor (optional)
 
 ## Requirements
@@ -107,6 +109,15 @@ Add to your `~/.zshrc`:
 source ~/path/to/plugins/zsh-fzf-artisan/artisan.plugin.zsh
 ```
 
+### Fish
+
+```sh
+git clone https://github.com/stubbedev/zsh-fzf-artisan ~/path/to/zsh-fzf-artisan
+ln -s ~/path/to/zsh-fzf-artisan/artisan.fish ~/.config/fish/conf.d/artisan.fish
+```
+
+Same completion engine and cache; candidates render in fish's native pager (no fzf involved). The binary is kept fresh by `update-binary.sh` in the background.
+
 ## Usage
 
 ```sh
@@ -144,6 +155,23 @@ Set `ARTISAN_OPEN_ON_MAKE_EDITOR` and any file created by `artisan make:*` will 
 export ARTISAN_OPEN_ON_MAKE_EDITOR="code"    # VS Code
 export ARTISAN_OPEN_ON_MAKE_EDITOR="nvim"    # Neovim
 export ARTISAN_OPEN_ON_MAKE_EDITOR="phpstorm" # PhpStorm
+```
+
+### Cache location
+
+Caches live in `~/.cache/artisan` by default, honoring `XDG_CACHE_HOME`. Override with `ARTISAN_CACHE_DIR`:
+
+```sh
+# ~/.zshrc, before the plugin loads
+export ARTISAN_CACHE_DIR=~/some/where/artisan
+```
+
+### Troubleshooting
+
+`artisan-comp doctor` prints everything the completer knows — binary version, php resolution, cache freshness, per-catalog counts:
+
+```sh
+~/.cache/artisan/bin/artisan-comp doctor --cwd /path/to/your/project
 ```
 
 ### Custom fzf flags
@@ -198,6 +226,12 @@ The binary:
 Bump `version` in `Cargo.toml`, tag the commit `v<version>`, push the tag. CI builds Linux (musl) and macOS binaries for both architectures and attaches them to the GitHub release.
 
 Installed plugins track the newest GitHub release automatically — no `git pull` required to receive a new binary. The shim resolves the latest release tag (via the `releases/latest` redirect, throttled to once a day) and silently downloads the matching binary in the background on a subsequent shell; the update is checksum-verified and invisible to the user. The `Cargo.toml` version is only a fallback used before the first successful lookup (fresh clone, offline, or `curl` unavailable). Changes to the plugin's own `.zsh` script still require updating the checkout.
+
+Release binaries carry signed GitHub build provenance. To verify one:
+
+```sh
+gh attestation verify artisan-comp-x86_64-unknown-linux-musl --repo stubbedev/zsh-fzf-artisan
+```
 
 ## License
 

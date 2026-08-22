@@ -20,6 +20,14 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+      - name: Shell shims
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq zsh fish
+          cargo build
+          zsh tests/zsh/completion_test.zsh target/debug/artisan-comp
+          fish -n artisan.fish
+          sh -n update-binary.sh
 
   laravel-smoke:
     runs-on: ubuntu-latest

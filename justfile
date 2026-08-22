@@ -42,7 +42,13 @@ lint-check:
 test:
     cargo test
 
-check: lint test
+# Headless zsh shim test: stubs compsys, drives _artisan against a fixture
+# project served by a fake php. Requires zsh (no fzf, no terminal needed).
+test-zsh:
+    cargo build
+    zsh tests/zsh/completion_test.zsh target/debug/artisan-comp
+
+check: lint test test-zsh
 
 clean:
     cargo clean

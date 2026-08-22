@@ -68,8 +68,21 @@ fn main() -> ExitCode {
             println!("{}", env!("CARGO_PKG_VERSION"));
             return ExitCode::SUCCESS;
         }
+        Some("doctor") => {
+            let cwd = args
+                .iter()
+                .position(|a| a == "--cwd")
+                .and_then(|i| args.get(i + 1))
+                .map(PathBuf::from)
+                .or_else(|| env::current_dir().ok());
+            let Some(cwd) = cwd else {
+                return ExitCode::FAILURE;
+            };
+            doctor(&cwd);
+            return ExitCode::SUCCESS;
+        }
         _ => {
-            eprintln!("usage: artisan-comp complete --cwd DIR --current N -- WORDS...");
+            eprintln!("usage: artisan-comp complete|doctor --cwd DIR [--current N -- WORDS...]");
             return ExitCode::from(2);
         }
     };
@@ -126,6 +139,14 @@ fn run(cwd: &Path, current: usize, words: &[String]) -> Option<String> {
     hash_input.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
     let project_hash = fnv_hex(&hash_input);
 
+    // The chpwd prewarm fires at command position, which never touches the
+    // catalog — build it here in every background refresh so the first
+    // args-position tab in a fresh project reads a TSV instead of parsing
+    // config/tests/routes in the foreground.
+    if refreshing() {
+        let _ = load_catalog(&project, &cache_dir, &project_hash);
+    }
+
     let out = if current <= 2 {
         complete_commands(&project, &cache_dir, &project_hash)
     } else {
@@ -138,6 +159,100 @@ fn run(cwd: &Path, current: usize, words: &[String]) -> Option<String> {
         maybe_spawn_refresh(&cache_dir, &project_hash, cwd, current, words);
     }
     out
+}
+
+/// Everything here is silent by design; `doctor` is the loud path — it prints
+/// what the completer knows so "why no completions?" is self-serviceable.
+fn doctor(cwd: &Path) {
+    println!("artisan-comp {}", env!("CARGO_PKG_VERSION"));
+
+    let php = env::var("_ARTISAN_PHP_BIN").unwrap_or_else(|_| "php".into());
+    let php_ok = if php.contains('/') {
+        Path::new(&php).is_file()
+    } else {
+        // Bare name — resolution happens at spawn; report what will be used.
+        true
+    };
+    println!(
+        "php:         {php}{}",
+        if php_ok { "" } else { "  (MISSING)" }
+    );
+    println!(
+        "native:      {}",
+        if native::enabled() {
+            "enabled (ARTISAN_COMP_NATIVE)"
+        } else {
+            "disabled"
+        }
+    );
+
+    let cache_dir = cache_dir();
+    println!("cache dir:   {}", cache_dir.display());
+
+    let Some(project) = find_artisan(cwd) else {
+        println!(
+            "project:     NOT FOUND (no artisan file above {})",
+            cwd.display()
+        );
+        return;
+    };
+    println!("artisan:     {}", project.artisan.display());
+
+    let mut hash_input = project.dir.as_os_str().as_encoded_bytes().to_vec();
+    hash_input.push(0);
+    hash_input.extend_from_slice(env!("CARGO_PKG_VERSION").as_bytes());
+    let project_hash = fnv_hex(&hash_input);
+    println!("cache key:   {project_hash}");
+
+    let age = |p: &Path| -> String {
+        match mtime(p).and_then(|t| t.elapsed().ok()) {
+            Some(e) => format!(
+                "{}s old, {} bytes",
+                e.as_secs(),
+                fs::metadata(p).map(|m| m.len()).unwrap_or(0)
+            ),
+            None => "missing".into(),
+        }
+    };
+    let list_file = cache_dir.join(format!("{project_hash}.list.json"));
+    let n_cmds = fs::read(&list_file)
+        .ok()
+        .and_then(|raw| serde_json::from_slice::<Value>(&raw).ok())
+        .and_then(|v| v.get("commands").and_then(Value::as_array).map(Vec::len))
+        .unwrap_or(0);
+    println!("list cache:  {} ({n_cmds} commands)", age(&list_file));
+
+    let catalog_file = cache_dir.join(format!("{project_hash}.catalog"));
+    println!("catalog:     {}", age(&catalog_file));
+    if let Ok(text) = fs::read_to_string(&catalog_file) {
+        let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+        for line in text.lines().filter(|l| !l.starts_with('#')) {
+            if let Some((tag, _)) = line.split_once('\t') {
+                *counts.entry(tag).or_default() += 1;
+            }
+        }
+        for (tag, n) in counts {
+            println!("  {tag}: {n}");
+        }
+    }
+
+    let n_vals = fs::read_dir(&cache_dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with(&project_hash) && name.ends_with(".vals")
+                })
+                .count()
+        })
+        .unwrap_or(0);
+    println!("value caches: {n_vals} command(s) extracted");
+    println!(
+        "refresh stamp: {}",
+        age(&cache_dir.join(format!("{project_hash}.refresh")))
+    );
 }
 
 /// Spawn a detached `refresh` run at most once per FRESH_TTL per project, so
@@ -544,6 +659,8 @@ fn complete_args(
 
     if let Some(args) = def.get("arguments").and_then(Value::as_object) {
         let mut position = 0usize;
+        let mut emitted_arg_vals = false;
+        let mut first_empty_key: Option<&str> = None;
         for (key, arg) in args {
             if !arg.is_object() || SKIP_ARGS.contains(&key.as_str()) {
                 continue;
@@ -562,8 +679,35 @@ fn complete_args(
             // Offer this positional's known values. No `<name>` placeholder is
             // emitted: selecting one would insert an empty `""`, not valid text.
             // A positional whose values we can't determine contributes nothing.
-            for v in combined(Kind::Argument, key) {
+            let vals = combined(Kind::Argument, key);
+            if vals.is_empty() {
+                first_empty_key.get_or_insert(key);
+            }
+            for v in vals {
+                emitted_arg_vals = true;
                 out.push_str(&format!("{v}\t<{key}> value\n"));
+            }
+        }
+        // Runtime-only positionals (queue:retry {id}, …): when nothing static
+        // exists for any offered positional, ask the opt-in native bridge —
+        // it completes the cursor position, so only the first empty one counts.
+        if !emitted_arg_vals
+            && native::enabled()
+            && current_word.is_none_or(|w| !w.starts_with('-'))
+        {
+            if let Some(key) = first_empty_key {
+                let native_key = format!("arg:{key}");
+                for v in native_cached(
+                    project,
+                    cache_dir,
+                    project_hash,
+                    &subcmd,
+                    &native_key,
+                    words,
+                    current,
+                ) {
+                    out.push_str(&format!("{v}\t<{key}> value\n"));
+                }
             }
         }
     }
@@ -965,7 +1109,14 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 
 fn cache_dir() -> PathBuf {
     if let Ok(dir) = env::var("ARTISAN_CACHE_DIR") {
-        return PathBuf::from(dir);
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    if let Ok(xdg) = env::var("XDG_CACHE_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("artisan");
+        }
     }
     let home = env::var("HOME").unwrap_or_else(|_| ".".into());
     PathBuf::from(home).join(".cache/artisan")

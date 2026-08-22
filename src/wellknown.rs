@@ -433,11 +433,111 @@ fn route_names(dir: &Path) -> Vec<String> {
             return;
         }
         if let Ok(src) = fs::read(path) {
-            scan_quoted_calls(&src, b"->name(", &mut out);
-            scan_quoted_calls(&src, b"::name(", &mut out);
+            let arena = LocalArena::new();
+            let program =
+                mago_syntax::parser::parse_file_content(&arena, FileId::new(b"r.php"), &src);
+            scan_route_stmts(program.statements.as_slice(), "", &mut out);
         }
     });
     out.into_iter().filter(|n| !n.ends_with('.')).collect()
+}
+
+/// Walk route statements, composing `Route::name('admin.')->group(fn)` name
+/// prefixes into the names declared inside the group. Each file is scanned
+/// independently — prefixes applied via `require`d files are not composed.
+fn scan_route_stmts(stmts: &[Statement], prefix: &str, out: &mut BTreeSet<String>) {
+    use mago_syntax::cst::cst::ClassLikeMemberSelector;
+    for s in stmts {
+        match s {
+            Statement::Expression(es) => scan_route_expr(es.expression, prefix, out),
+            Statement::Block(b) => scan_route_stmts(b.statements.as_slice(), prefix, out),
+            Statement::Namespace(ns) => {
+                let inner = match &ns.body {
+                    NamespaceBody::Implicit(b) => b.statements.as_slice(),
+                    NamespaceBody::BraceDelimited(b) => b.statements.as_slice(),
+                };
+                scan_route_stmts(inner, prefix, out);
+            }
+            _ => {}
+        }
+    }
+
+    /// One fluent chain: collect its `name('x')` part and `group(fn)` body,
+    /// then either recurse into the group with the composed prefix or emit
+    /// the full route name.
+    fn scan_route_expr(expr: &Expression, prefix: &str, out: &mut BTreeSet<String>) {
+        let mut name_part: Option<String> = None;
+        let mut group_body: Option<&Expression> = None;
+        let mut cur = expr;
+        loop {
+            match cur {
+                Expression::Parenthesized(p) => cur = p.expression,
+                Expression::Call(Call::Method(mc)) => {
+                    if let ClassLikeMemberSelector::Identifier(id) = &mc.method {
+                        match id.value {
+                            // Walking outer→inner: the innermost name() is the
+                            // group prefix / route name, so later (inner) wins.
+                            b"name" | b"as" => {
+                                if let Some(n) = mc
+                                    .argument_list
+                                    .arguments
+                                    .iter()
+                                    .next()
+                                    .and_then(|a| lit_str(a.value()))
+                                {
+                                    name_part = Some(n);
+                                }
+                            }
+                            b"group" => {
+                                group_body =
+                                    mc.argument_list.arguments.iter().next().map(|a| a.value());
+                            }
+                            _ => {}
+                        }
+                    }
+                    cur = mc.object;
+                }
+                Expression::Call(Call::StaticMethod(smc)) => {
+                    if let ClassLikeMemberSelector::Identifier(id) = &smc.method {
+                        match id.value {
+                            b"name" | b"as" => {
+                                if let Some(n) = smc
+                                    .argument_list
+                                    .arguments
+                                    .iter()
+                                    .next()
+                                    .and_then(|a| lit_str(a.value()))
+                                {
+                                    name_part = Some(n);
+                                }
+                            }
+                            b"group" => {
+                                group_body =
+                                    smc.argument_list.arguments.iter().next().map(|a| a.value());
+                            }
+                            _ => {}
+                        }
+                    }
+                    break;
+                }
+                _ => break,
+            }
+        }
+        if let Some(body) = group_body {
+            let composed = match &name_part {
+                Some(n) => format!("{prefix}{n}"),
+                None => prefix.to_string(),
+            };
+            if let Expression::Closure(c) = unparen(body) {
+                scan_route_stmts(c.body.statements.as_slice(), &composed, out);
+            }
+        } else if let Some(n) = name_part {
+            let full = format!("{prefix}{n}");
+            if !full.is_empty() {
+                out.insert(full);
+            }
+        }
+    }
 }
 
 /// `<testsuite name="...">` entries from phpunit.xml(.dist) → `test --testsuite=`.
@@ -994,10 +1094,10 @@ return [
             cat.values("test", &Kind::Option, "group"),
             vec!["integration", "legacy", "slow"]
         );
-        // Group prefix 'admin.' dropped; names inside groups still surface.
+        // Group name prefixes compose into the names declared inside.
         assert_eq!(
             cat.values("route:list", &Kind::Option, "name"),
-            vec!["dashboard", "home"]
+            vec!["admin.dashboard", "home"]
         );
         assert_eq!(
             cat.values("queue:work", &Kind::Option, "queue"),

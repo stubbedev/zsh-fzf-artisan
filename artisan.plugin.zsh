@@ -11,8 +11,10 @@
 # to zsh/fzf. No local toolchain is needed; `git pull` upgrades everything.
 # fzf is optional — falls back to native zsh completion when not available.
 
-# Cache setup
-ARTISAN_CACHE_DIR="${HOME}/.cache/artisan"
+# Cache setup — user-overridable, XDG-aware. Exported so the binary (which
+# reads the same env var) agrees with the shim on where the cache lives.
+ARTISAN_CACHE_DIR="${ARTISAN_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/artisan}"
+export ARTISAN_CACHE_DIR
 mkdir -p "$ARTISAN_CACHE_DIR"
 
 # Downloaded binary lives under the (writable) cache dir — NOT the plugin dir,
@@ -25,10 +27,16 @@ typeset -g _ARTISAN_BIN_DIR="${ARTISAN_CACHE_DIR}/bin"
 zmodload -s zsh/datetime
 
 # Cache fzf availability at load time — avoids a fork on every tab press.
+# When absent, keep re-checking per tab (forks only while fzf is missing) and
+# latch to a constant true once it appears, so installing fzf mid-session works.
 if command -v fzf >/dev/null 2>&1; then
   _artisan_fzf_available() { return 0 }
 else
-  _artisan_fzf_available() { return 1 }
+  _artisan_fzf_available() {
+    command -v fzf >/dev/null 2>&1 || return 1
+    _artisan_fzf_available() { return 0 }
+    return 0
+  }
 fi
 
 # Resolve PHP binary at load time — completion subshells may have a stripped PATH
@@ -249,7 +257,7 @@ function _artisan_prewarm() {
   [[ -n "$_ARTISAN_COMP_BIN" ]] || _artisan_locate_binary || return
   _artisan_find || return
   local root="${REPLY:h}"
-  [[ -n "${_ARTISAN_WARMED[$root]}" ]] && return
+  [[ -n "${_ARTISAN_WARMED[$root]:-}" ]] && return
   _ARTISAN_WARMED[$root]=1
   "$_ARTISAN_COMP_BIN" refresh --cwd "$root" --current 2 -- artisan "" &>/dev/null &!
 }
@@ -435,7 +443,7 @@ compdef _artisan './artisan'
 typeset -gA _ARTISAN_PREV_COMPS
 () {
   local c
-  for c in php sail; do
+  for c in php sail herd; do
     if [[ -n "${_comps[$c]:-}" && "${_comps[$c]}" != _artisan_php_wrapper ]]; then
       _ARTISAN_PREV_COMPS[$c]="${_comps[$c]}"
     fi
@@ -471,5 +479,6 @@ function _artisan_php_wrapper() {
 }
 compdef _artisan_php_wrapper php
 
-# `sail artisan ...` — same word-scan delegation as the php wrapper.
+# `sail artisan ...` / `herd php artisan ...` — same word-scan delegation.
 compdef _artisan_php_wrapper sail
+compdef _artisan_php_wrapper herd
