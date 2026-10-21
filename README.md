@@ -55,7 +55,7 @@ Without fzf the same candidates come through native zsh completion, filtered by 
 - **zsh**, **curl** (or wget)
 - **fzf** _(optional)_ — enables the fuzzy picker; falls back to standard zsh completion without it
 
-Completions are powered by a prebuilt binary (`artisan-comp`) that the plugin downloads automatically in the background on first load — no toolchain needed. Prebuilt targets: Linux (x86_64, aarch64, static musl) and macOS (x86_64, aarch64). On other platforms, build it yourself with `cargo build --release`; the plugin picks up `target/release/artisan-comp` automatically.
+Completions are powered by a prebuilt binary (`artisan-comp`) that the plugin downloads automatically in the background on first load — no toolchain needed. Prebuilt targets: Linux (x86_64, aarch64, static musl) and macOS (aarch64). On other platforms, build it yourself with `cargo build --release`; the plugin picks up `target/release/artisan-comp` automatically.
 
 ### Install fzf (optional)
 
@@ -223,7 +223,7 @@ The binary:
 
 ## Releasing (maintainers)
 
-Bump `version` in `Cargo.toml`, tag the commit `v<version>`, push the tag. CI builds Linux (musl) and macOS binaries for both architectures and attaches them to the GitHub release.
+Bump `version` in `Cargo.toml`, tag the commit `v<version>`, push the tag. CI builds Linux (musl) binaries for x86_64 and aarch64 and a macOS binary for aarch64 and attaches them to the GitHub release.
 
 Installed plugins track the newest GitHub release automatically — no `git pull` required to receive a new binary. The shim resolves the latest release tag (via the `releases/latest` redirect, throttled to once a day) and silently downloads the matching binary in the background on a subsequent shell; the update is checksum-verified and invisible to the user. The `Cargo.toml` version is only a fallback used before the first successful lookup (fresh clone, offline, or `curl` unavailable). Changes to the plugin's own `.zsh` script still require updating the checkout.
 

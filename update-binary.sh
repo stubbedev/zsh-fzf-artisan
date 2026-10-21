@@ -57,19 +57,15 @@ if [ -f "$dstamp" ]; then
 fi
 printf '%s %s\n' "$wanted" "$now" >"$dstamp" 2>/dev/null || true
 
-case "$(uname -s)" in
-Darwin) os="apple-darwin" ;;
-Linux) os="unknown-linux-musl" ;;
-*) exit 0 ;;
-esac
-case "$(uname -m)" in
-arm64 | aarch64) arch="aarch64" ;;
-x86_64 | amd64) arch="x86_64" ;;
+case "$(uname -s):$(uname -m)" in
+Darwin:arm64 | Darwin:aarch64) target="aarch64-apple-darwin" ;;
+Linux:arm64 | Linux:aarch64) target="aarch64-unknown-linux-musl" ;;
+Linux:x86_64 | Linux:amd64) target="x86_64-unknown-linux-musl" ;;
 *) exit 0 ;;
 esac
 
 mkdir -p "$bindir"
-base="https://github.com/$repo/releases/download/v$wanted/artisan-comp-$arch-$os"
+base="https://github.com/$repo/releases/download/v$wanted/artisan-comp-$target"
 tmp="$bindir/.artisan-comp.$$"
 if ! curl -fsSL -o "$tmp" "$base" || ! curl -fsSL -o "$tmp.sha256" "$base.sha256"; then
     rm -f "$tmp" "$tmp.sha256"
